@@ -1,6 +1,6 @@
 {
   "name": "herdr-issue",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Launch GitHub issues autonomously, each in its own Herdr worktree and Claude Code session",
   "author": {
     "name": "Jeff Simpson"
