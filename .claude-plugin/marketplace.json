@@ -1,0 +1,14 @@
+{
+  "name": "herdr-issue",
+  "description": "Herdr launchers for Claude Code",
+  "owner": {
+    "name": "Jeff Simpson"
+  },
+  "plugins": [
+    {
+      "name": "herdr-issue",
+      "source": "./plugins/herdr-issue",
+      "description": "Launch GitHub issues autonomously, each in its own Herdr worktree and Claude Code session"
+    }
+  ]
+}

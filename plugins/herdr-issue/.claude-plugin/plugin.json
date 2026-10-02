@@ -1,0 +1,10 @@
+{
+  "name": "herdr-issue",
+  "version": "0.2.0",
+  "description": "Launch GitHub issues autonomously, each in its own Herdr worktree and Claude Code session",
+  "author": {
+    "name": "Jeff Simpson"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/fooblahblah/herdr-issue"
+}

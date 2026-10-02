@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    echo "usage: herdr-issue <issue-number>... [--plain | --ultracode]" >&2
+    echo "Issue numbers may be separated by spaces or commas." >&2
+    exit 2
+}
+
+# With no flag the mode is detected further down: superpowers when the
+# Superpowers plugin is enabled, plain when it is not. --plain runs the
+# prompt's own workflow and --ultracode turns the session into ultracode; both
+# switch the Superpowers plugin off for the session.
+mode=""
+issues=()
+for arg in "$@"; do
+    # The /issue skill passes all of its arguments as one string, so split
+    # every argument on whitespace and commas. read -d '' keeps going past
+    # newlines and returns 1 at the end of its input, hence the || true.
+    read -r -d '' -a tokens <<<"${arg//,/ }" || true
+    for token in "${tokens[@]}"; do
+        case "$token" in
+            --plain | --ultracode)
+                [[ -z "$mode" || "$mode" == "${token#--}" ]] || usage
+                mode="${token#--}"
+                ;;
+            *)
+                [[ "$token" =~ ^[0-9]+$ ]] || usage
+                # A number listed twice is launched once.
+                [[ " ${issues[*]} " == *" $token "* ]] || issues+=("$token")
+                ;;
+        esac
+    done
+done
+
+if [[ ${#issues[@]} -eq 0 ]]; then
+    usage
+fi
+
+# Several issues: launch each through the single-issue path below as its own
+# process, so an issue that cannot launch never stops the rest, then report.
+if [[ ${#issues[@]} -gt 1 ]]; then
+    flag="${mode:+--$mode}"
+    launched=()
+    skipped=()
+    for n in "${issues[@]}"; do
+        if output="$("$0" "$n" "$flag" 2>&1)"; then
+            launched+=("#$n")
+        else
+            reason="$(grep -m1 -v '^[[:space:]]*$' <<<"$output" || true)"
+            skipped+=("#$n  ${reason:-exited without a message}")
+        fi
+        printf '%s\n\n' "$output"
+    done
+    echo "Launched: ${launched[*]:-none}"
+    for line in "${skipped[@]}"; do
+        echo "Skipped:  $line"
+    done
+    [[ ${#skipped[@]} -eq 0 ]] || exit 1
+    exit 0
+fi
+
+issue="${issues[0]}"
+
+repo="$(git rev-parse --show-toplevel)"
+
+# The plugin root is the parent of this script's directory, wherever the
+# plugin is installed.
+plugin_root="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
+
+# Make sure Herdr is available/running.
+if ! herdr status server >/dev/null 2>&1; then
+    echo "Herdr server is not running. Start Herdr first." >&2
+    exit 1
+fi
+
+# Refuse to start a second session for an issue that already has a worktree.
+# Match the "issue/<N>-" branch prefix rather than the full slug, so a
+# retitled issue is still caught.
+existing="$(
+    herdr worktree list --cwd "$repo" |
+        jq -c --arg prefix "issue/${issue}-" \
+            'first(.result.worktrees[] | select((.branch // "") | startswith($prefix))) // empty'
+)"
+
+if [[ -n "$existing" ]]; then
+    wt_branch="$(jq -r '.branch' <<<"$existing")"
+    wt_path="$(jq -r '.path' <<<"$existing")"
+    wt_workspace="$(jq -r '.open_workspace_id // empty' <<<"$existing")"
+    agent_status="$(
+        herdr agent list |
+            jq -r --arg name "issue-${issue}" \
+                'first(.result.agents[] | select(.name == $name) | .agent_status) // empty'
+    )"
+
+    {
+        if [[ -n "$agent_status" ]]; then
+            echo "Issue #${issue} is already running. No new session was started."
+        else
+            echo "Issue #${issue} already has a worktree. No new session was started."
+        fi
+        echo
+        echo "Workspace: ${wt_workspace:-(not open in Herdr)}"
+        echo "Agent:     issue-${issue} (${agent_status:-not running})"
+        echo "Branch:    ${wt_branch}"
+        echo "Worktree:  ${wt_path}"
+        echo
+        if [[ -n "$wt_workspace" ]]; then
+            echo "Switch to workspace ${wt_workspace} in Herdr to see it."
+        else
+            echo "Reopen it with: herdr worktree open --cwd \"${repo}\" --path \"${wt_path}\""
+        fi
+    } >&2
+    exit 1
+fi
+
+# Every superpowers* plugin named in the user, project and local settings, and
+# whether any is enabled once those files are merged (later files win).
+settings_sources=()
+for f in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" \
+    "$repo/.claude/settings.json" \
+    "$repo/.claude/settings.local.json"; do
+    if [[ -f "$f" ]]; then
+        settings_sources+=("$f")
+    fi
+done
+
+superpowers_plugins="$(
+    jq -n -c '
+        [inputs | .enabledPlugins // {}] | add // {}
+        | with_entries(select(.key | startswith("superpowers")))
+    ' "${settings_sources[@]}" </dev/null
+)"
+
+mode_note=""
+if [[ -z "$mode" ]]; then
+    if jq -e 'any(.[]; . == true)' <<<"$superpowers_plugins" >/dev/null; then
+        mode=superpowers
+        mode_note=" (Superpowers plugin detected; --plain runs without it)"
+    else
+        mode=plain
+        mode_note=" (Superpowers plugin not enabled)"
+    fi
+fi
+
+# Get authoritative issue metadata.
+issue_json="$(
+    gh issue view "$issue" \
+        --json number,title,state,url
+)"
+
+title="$(jq -r '.title' <<<"$issue_json")"
+state="$(jq -r '.state' <<<"$issue_json")"
+issue_url="$(jq -r '.url' <<<"$issue_json")"
+
+if [[ "$state" != "OPEN" ]]; then
+    echo "Issue #$issue is not open ($state)." >&2
+    exit 1
+fi
+
+# Build the prompt before creating anything, so a template mistake leaves no
+# worktree behind. The template marks mode-specific text with {{#<mode>}} and
+# {{/<mode>}} lines; text outside a section goes to every mode.
+# A repository can carry its own template at
+# .claude/prompts/autonomous-issue.md; otherwise the plugin's is used.
+template="$repo/.claude/prompts/autonomous-issue.md"
+if [[ ! -f "$template" ]]; then
+    template="$plugin_root/prompts/autonomous-issue.md"
+fi
+
+# Issues branch from the remote's default branch. origin/HEAD is set by
+# `git clone`; a repository without it is assumed to use main.
+base="$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
+base="${base#origin/}"
+base="${base:-main}"
+
+prompt="$(
+    awk -v mode="$mode" '
+        function fail(msg) {
+            printf "%s line %d: %s\n", FILENAME, FNR, msg > "/dev/stderr"
+            bad = 1
+            exit 1
+        }
+        /^[{][{]#[a-z]+[}][}]$/ {
+            if (section != "") fail("section opened inside {{#" section "}}")
+            section = substr($0, 4, length($0) - 5)
+            if (section !~ /^(superpowers|plain|ultracode)$/) fail("unknown section " $0)
+            next
+        }
+        /^[{][{]\/[a-z]+[}][}]$/ {
+            if (substr($0, 4, length($0) - 5) != section) fail("unmatched " $0)
+            section = ""
+            next
+        }
+        section == "" || section == mode
+        END {
+            if (bad) exit 1
+            if (section != "") fail("{{#" section "}} is never closed")
+        }
+    ' "$template" |
+        sed -e "s|{{ISSUE_URL}}|${issue_url}|g" -e "s|{{DEFAULT_BRANCH}}|${base}|g"
+)"
+
+# "ultracode" anywhere in a prompt opts that turn into workflows, so only the
+# ultracode prompt may contain the word.
+if [[ "$mode" != ultracode ]] && grep -qi ultracode <<<"$prompt"; then
+    echo "The ${mode} prompt from ${template} mentions ultracode;" \
+        "move that text into an {{#ultracode}} section." >&2
+    exit 1
+fi
+
+agent_args=(--model opus)
+
+# Per-session settings for the modes that run without Superpowers: every
+# superpowers* plugin off, so its skills and SessionStart hook stay out of the
+# session while superpowers sessions keep them, and ultracode on where asked.
+# A --settings file outranks user and project settings, and it lives in the
+# repo's git dir, out of git's sight.
+if [[ "$mode" == ultracode ]] ||
+    [[ "$mode" == plain && "$superpowers_plugins" != "{}" ]]; then
+    settings_dir="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/herdr-issue"
+    mkdir -p "$settings_dir"
+    session_settings="${settings_dir}/issue-${issue}.settings.json"
+
+    jq --arg mode "$mode" '
+        {enabledPlugins: map_values(false)}
+        | if $mode == "ultracode" then {ultracode: true} + . else . end
+    ' <<<"$superpowers_plugins" >"$session_settings"
+
+    agent_args+=(--settings "$session_settings")
+fi
+
+# Keep branch names readable but deterministic.
+slug="$(
+    printf '%s' "$title" |
+        tr '[:upper:]' '[:lower:]' |
+        sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' |
+        cut -c1-48 |
+        # The cut can land just after a word; drop the dash it leaves.
+        sed -E 's/-+$//'
+)"
+
+branch="issue/${issue}-${slug}"
+label="#${issue} ${title}"
+
+# Every issue begins from the current remote default branch, independently.
+git -C "$repo" fetch origin "$base"
+
+created="$(
+    herdr worktree create \
+        --cwd "$repo" \
+        --branch "$branch" \
+        --base "origin/${base}" \
+        --label "$label" \
+        --no-focus
+)"
+
+workspace_id="$(jq -r '.result.workspace.workspace_id' <<<"$created")"
+tab_id="$(jq -r '.result.tab.tab_id' <<<"$created")"
+pane_id="$(jq -r '.result.root_pane.pane_id' <<<"$created")"
+
+# Give the initial layout useful names.
+herdr tab rename "$tab_id" agent >/dev/null
+
+# Handy independent shell in the same worktree.
+herdr tab create \
+    --workspace "$workspace_id" \
+    --label shell \
+    --no-focus >/dev/null
+
+# New Claude sessions run Opus 5.5 at high effort. Opus 5.5 thinks longer per
+# turn than Opus 5 at the same level, most of all at xhigh, and its migration
+# guidance reserves xhigh for work with a measured gain. Subagents inherit this
+# level unless their definition sets one; the final whole-branch review keeps
+# xhigh through the plugin's final-reviewer agent (agents/final-reviewer.md).
+# Ultracode sessions stay at xhigh, as before; only the --settings file above
+# turns ultracode on.
+effort=high
+if [[ "$mode" == ultracode ]]; then
+    effort=xhigh
+fi
+# The pane's shell may still be starting when this is typed, so wait until
+# the shell has actually run it. The printf assembles the marker at run time,
+# so the typed command line itself never matches.
+herdr pane run "$pane_id" \
+    "export CLAUDE_CODE_EFFORT_LEVEL=${effort}; printf '%s-%s\n' herdr-issue ready" >/dev/null
+herdr pane wait-output "$pane_id" \
+    --match "herdr-issue-ready" \
+    --timeout 30000 >/dev/null
+
+agent_name="issue-${issue}"
+
+# The shell can still be redrawing its prompt after the marker prints, and
+# `agent start` refuses a pane that is not at an idle prompt, so retry while
+# Herdr reports the pane busy.
+for attempt in $(seq 1 30); do
+    if start_err="$(
+        herdr agent start "$agent_name" \
+            --kind claude \
+            --pane "$pane_id" \
+            --timeout 120000 \
+            -- \
+            "${agent_args[@]}" 2>&1 >/dev/null
+    )"; then
+        break
+    fi
+    if [[ "$start_err" != *agent_pane_busy* || "$attempt" -eq 30 ]]; then
+        echo "Could not start the agent in pane ${pane_id} (workspace ${workspace_id}):" >&2
+        echo "$start_err" >&2
+        exit 1
+    fi
+    sleep 1
+done
+
+# Submit and return immediately. Herdr owns the running agent from here.
+herdr agent prompt "$agent_name" "$prompt" >/dev/null
+
+# Mark the issue as being worked on, only once a session is actually running.
+# "@me" resolves to whoever gh is logged in as, so each launcher assigns
+# themselves. The session is already up, so a failure here only warns.
+if ! gh issue edit "$issue" --add-assignee @me >/dev/null; then
+    echo "Warning: could not assign issue #${issue} to you; assign it by hand." >&2
+fi
+
+cat <<EOF
+Launched issue #${issue}
+
+Workspace: ${workspace_id}
+Agent:     ${agent_name}
+Branch:    ${branch}
+Mode:      ${mode}${mode_note}
+Issue:     ${issue_url}
+
+The Claude session is running independently in Herdr.
+EOF
