@@ -186,8 +186,19 @@ def test_single_string_form_splits_and_applies_ultracode_to_each(harness):
 def test_session_effort_is_high_and_ultracode_keeps_xhigh(harness, args, effort):
     proc, calls = harness.run(*args, issues={"101": OPEN})
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    run = next(c for c in calls if c[:3] == ["herdr", "pane", "run"])
-    assert run[4].startswith(f"export CLAUDE_CODE_EFFORT_LEVEL={effort};")
+    start = agent_starts(calls)[0]
+    claude_args = start[start.index("--") + 1 :]
+    assert claude_args[claude_args.index("--effort") + 1] == effort
+
+
+def test_effort_is_never_exported_into_the_pane(harness):
+    # CLAUDE_CODE_EFFORT_LEVEL outranks a subagent's own `effort:`, so an
+    # export would pin final-reviewer to the session's high instead of xhigh.
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    typed = [c[4] for c in calls if c[:3] == ["herdr", "pane", "run"]]
+    assert typed
+    assert not any("CLAUDE_CODE_EFFORT_LEVEL" in cmd for cmd in typed)
 
 
 @pytest.mark.parametrize(("args", "routed"), [(("101",), True), (("101", "--ultracode"), False)])

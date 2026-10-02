@@ -209,7 +209,24 @@ if [[ "$mode" != ultracode ]] && grep -qi ultracode <<<"$prompt"; then
     exit 1
 fi
 
-agent_args=(--model opus)
+# New Claude sessions run Opus 5.5 at high effort. Opus 5.5 thinks longer per
+# turn than Opus 5 at the same level, most of all at xhigh, and its migration
+# guidance reserves xhigh for work with a measured gain. Subagents inherit this
+# level unless their definition sets one; the final whole-branch review keeps
+# xhigh through the plugin's final-reviewer agent (agents/final-reviewer.md).
+# Ultracode sessions stay at xhigh.
+#
+# The level goes on the command line as --effort, never as an exported
+# CLAUDE_CODE_EFFORT_LEVEL. That variable outranks every other effort source,
+# a subagent's own `effort:` included, so exporting it pinned final-reviewer
+# to the session's level (measured: with the variable set to high, an
+# `effort: xhigh` agent ran at high; with --effort high, it ran at xhigh).
+effort=high
+if [[ "$mode" == ultracode ]]; then
+    effort=xhigh
+fi
+
+agent_args=(--model opus --effort "$effort")
 
 # Per-session settings for the modes that run without Superpowers: every
 # superpowers* plugin off, so its skills and SessionStart hook stay out of the
@@ -268,22 +285,10 @@ herdr tab create \
     --label shell \
     --no-focus >/dev/null
 
-# New Claude sessions run Opus 5.5 at high effort. Opus 5.5 thinks longer per
-# turn than Opus 5 at the same level, most of all at xhigh, and its migration
-# guidance reserves xhigh for work with a measured gain. Subagents inherit this
-# level unless their definition sets one; the final whole-branch review keeps
-# xhigh through the plugin's final-reviewer agent (agents/final-reviewer.md).
-# Ultracode sessions stay at xhigh, as before; only the --settings file above
-# turns ultracode on.
-effort=high
-if [[ "$mode" == ultracode ]]; then
-    effort=xhigh
-fi
-# The pane's shell may still be starting when this is typed, so wait until
-# the shell has actually run it. The printf assembles the marker at run time,
-# so the typed command line itself never matches.
-herdr pane run "$pane_id" \
-    "export CLAUDE_CODE_EFFORT_LEVEL=${effort}; printf '%s-%s\n' herdr-issue ready" >/dev/null
+# The pane's shell may still be starting when the agent is started, so wait
+# until the shell has run a command. The printf assembles the marker at run
+# time, so the typed command line itself never matches.
+herdr pane run "$pane_id" "printf '%s-%s\n' herdr-issue ready" >/dev/null
 herdr pane wait-output "$pane_id" \
     --match "herdr-issue-ready" \
     --timeout 30000 >/dev/null
