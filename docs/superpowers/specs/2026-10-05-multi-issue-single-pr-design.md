@@ -26,22 +26,22 @@ For a single issue every name is unchanged. For several, in the order given:
 
 | Thing          | Single issue            | Several issues                        |
 |----------------|-------------------------|---------------------------------------|
-| Branch         | `issue/12-<slug>`       | `issue/12+15+17-<slug>`               |
-| Agent          | `issue-12`              | `issue-12-15-17`                      |
-| Settings file  | `issue-12.settings.json`| `issue-12-15-17.settings.json`        |
+| Branch         | `issue/12-<slug>`       | `issue/12_15_17-<slug>`               |
+| Agent          | `issue-12`              | `issue-12_15_17`                      |
+| Settings file  | `issue-12.settings.json`| `issue-12_15_17.settings.json`        |
 | Herdr label    | `#12 <title>`           | `#12 #15 #17 <first title>`           |
 
-The slug comes from the first issue's title. `+` keeps the number list
+The slug comes from the first issue's title. `_` keeps the number list
 unambiguous when a slug itself starts with digits.
 
 ### Existing-worktree detection
 
 A worktree's issues are read from its branch with
-`^issue/([0-9]+(\+[0-9]+)*)-`, split on `+`. Issue N is taken when N is in
+`^issue/([0-9]+(_[0-9]+)*)-`, split on `_`. Issue N is taken when N is in
 that list for any worktree. An old single-issue branch parses as a list of
-one, and `/issue 15` notices #15 inside `issue/12+15-…`. The "already
+one, and `/issue 15` notices #15 inside `issue/12_15-…`. The "already
 running" check derives the agent name from that branch's list
-(`issue-` + numbers joined by `-`).
+(`issue-` + numbers joined by `_`).
 
 ### After the session starts
 
@@ -119,7 +119,7 @@ and runs on the rendered prompt.
 ## Tests (`tests/test_herdr_issue.py`)
 
 - Remove the fan-out tests.
-- Several issues: one worktree with the `+` branch, the combined agent name
+- Several issues: one worktree with the `_` branch, the combined agent name
   and label, every issue assigned, the summary lists every URL, and the
   rendered prompt contains the `multi` paragraph and every URL.
 - Aborts with nothing created when one issue is closed, or one is already in
