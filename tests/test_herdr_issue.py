@@ -59,7 +59,8 @@ elif tool == "gh":
         sys.exit(f"stub gh: unexpected {args}")
 elif tool == "herdr":
     if args[:2] == ["worktree", "list"]:
-        print(json.dumps({"result": {"worktrees": []}}))
+        worktrees = json.loads(os.environ.get("STUB_WORKTREES", "[]"))
+        print(json.dumps({"result": {"worktrees": worktrees}}))
     elif args[:2] == ["worktree", "create"]:
         print(json.dumps({"result": {
             "workspace": {"workspace_id": "w1"},
@@ -91,7 +92,7 @@ class Harness:
         self.log = tmp_path / "calls.jsonl"
 
     def run(
-        self, *args: str, issues: dict, origin_head: str = ""
+        self, *args: str, issues: dict, origin_head: str = "", worktrees: list | None = None
     ) -> tuple[subprocess.CompletedProcess, list]:
         env = {
             **os.environ,
@@ -102,6 +103,7 @@ class Harness:
             "STUB_REPO": str(self.repo),
             "STUB_ISSUES": json.dumps(issues),
             "STUB_ORIGIN_HEAD": origin_head,
+            "STUB_WORKTREES": json.dumps(worktrees or []),
         }
         proc = subprocess.run(
             [str(SCRIPT), *args],
@@ -151,35 +153,6 @@ def test_bad_or_missing_issue_numbers_launch_nothing(harness, args):
     assert calls == []
 
 
-def test_two_open_issues_both_launch(harness):
-    proc, calls = harness.run("101", "102", issues={"101": OPEN, "102": OPEN})
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert agents_started(calls) == ["issue-101", "issue-102"]
-    assert "Launched: #101 #102" in proc.stdout
-    assert "Skipped:" not in proc.stdout
-
-
-def test_closed_issue_is_skipped_and_the_rest_launch(harness):
-    issues = {"101": OPEN, "102": CLOSED, "103": OPEN}
-    proc, calls = harness.run("101", "102", "103", issues=issues)
-    assert proc.returncode == 1
-    assert agents_started(calls) == ["issue-101", "issue-103"]
-    assert "Launched: #101 #103" in proc.stdout
-    assert "Skipped:  #102  Issue #102 is not open (CLOSED)." in proc.stdout
-
-
-def test_single_string_form_splits_and_applies_ultracode_to_each(harness):
-    proc, calls = harness.run("101, 102 --ultracode", issues={"101": OPEN, "102": OPEN})
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    starts = agent_starts(calls)
-    assert [c[3] for c in starts] == ["issue-101", "issue-102"]
-    settings_dir = harness.repo / ".git" / "herdr-issue"
-    for start, n in zip(starts, ("101", "102"), strict=True):
-        path = settings_dir / f"issue-{n}.settings.json"
-        assert start[start.index("--settings") + 1] == str(path)
-        assert json.loads(path.read_text())["ultracode"] is True
-
-
 @pytest.mark.parametrize(
     ("args", "effort"), [(("101",), "high"), (("101", "--ultracode"), "xhigh")]
 )
@@ -219,12 +192,6 @@ def test_final_reviewer_agent_runs_at_xhigh():
     frontmatter = agent.split("---")[1].splitlines()
     assert "name: final-reviewer" in frontmatter
     assert "effort: xhigh" in frontmatter
-
-
-def test_repeated_number_launches_once(harness):
-    proc, calls = harness.run("101", "102", "101", issues={"101": OPEN, "102": OPEN})
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert agents_started(calls) == ["issue-101", "issue-102"]
 
 
 def test_branch_slug_never_ends_in_a_dash(harness):
@@ -301,14 +268,6 @@ def test_plain_flag_switches_an_enabled_superpowers_plugin_off(harness):
     assert settings == {"enabledPlugins": {SUPERPOWERS: False}}
 
 
-def test_several_issues_pass_the_plain_flag_to_each(harness):
-    harness.enable_plugins({SUPERPOWERS: True})
-    proc, calls = harness.run("101 102 --plain", issues={"101": OPEN, "102": OPEN})
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.count("Mode:      plain\n") == 2
-    assert all("--settings" in start for start in agent_starts(calls))
-
-
 def use_template(harness, text: str) -> None:
     override = harness.repo / ".claude" / "prompts" / "autonomous-issue.md"
     override.parent.mkdir(parents=True, exist_ok=True)
@@ -375,3 +334,125 @@ def test_plugin_prompt_opens_with_the_issue(harness):
     proc, calls = harness.run("101", issues={"101": OPEN})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert prompt_sent(calls).startswith(f"Let's start working on {URL.format(101)}.\n")
+
+
+def created_worktree(calls: list) -> list:
+    return next(c for c in calls if c[:3] == ["herdr", "worktree", "create"])
+
+
+def launched_nothing(calls: list) -> bool:
+    return (
+        not any(c[:3] == ["herdr", "worktree", "create"] for c in calls)
+        and agent_starts(calls) == []
+        and not any(c[:3] == ["gh", "issue", "edit"] for c in calls)
+    )
+
+
+def test_several_issues_share_one_session(harness):
+    issues = {"101": OPEN, "102": {"state": "OPEN", "title": "Second"}}
+    proc, calls = harness.run("101", "102", issues=issues)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert agents_started(calls) == ["issue-101_102"]
+    create = created_worktree(calls)
+    assert create[create.index("--branch") + 1] == "issue/101_102-notional-issue-title"
+    assert create[create.index("--label") + 1] == "#101 #102 Notional issue title"
+    edits = [c[3] for c in calls if c[:3] == ["gh", "issue", "edit"]]
+    assert edits == ["101", "102"]
+    assert proc.stdout.startswith("Launched issues #101 #102\n")
+    assert f"Issue:     {URL.format(101)}\nIssue:     {URL.format(102)}\n" in proc.stdout
+    assert prompt_sent(calls).startswith(
+        f"Let's start working on {URL.format(101)} and {URL.format(102)}.\n"
+    )
+
+
+def test_single_string_form_splits_and_applies_ultracode(harness):
+    proc, calls = harness.run("101, 102 --ultracode", issues={"101": OPEN, "102": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    (start,) = agent_starts(calls)
+    assert start[3] == "issue-101_102"
+    path = harness.repo / ".git" / "herdr-issue" / "issue-101_102.settings.json"
+    assert start[start.index("--settings") + 1] == str(path)
+    assert json.loads(path.read_text())["ultracode"] is True
+
+
+def test_several_issues_take_the_plain_flag(harness):
+    harness.enable_plugins({SUPERPOWERS: True})
+    proc, calls = harness.run("101 102 --plain", issues={"101": OPEN, "102": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.count("Mode:      plain\n") == 1
+    assert "--settings" in agent_starts(calls)[0]
+
+
+def test_repeated_number_launches_once(harness):
+    proc, calls = harness.run("101", "102", "101", issues={"101": OPEN, "102": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert agents_started(calls) == ["issue-101_102"]
+
+
+def test_closed_issues_launch_nothing_and_are_all_reported(harness):
+    issues = {"101": OPEN, "102": CLOSED, "103": CLOSED}
+    proc, calls = harness.run("101", "102", "103", issues=issues)
+    assert proc.returncode == 1
+    assert "Issue #102 is not open (CLOSED)." in proc.stderr
+    assert "Issue #103 is not open (CLOSED)." in proc.stderr
+    assert "Nothing was launched" in proc.stderr
+    assert launched_nothing(calls)
+
+
+@pytest.mark.parametrize(
+    ("branch", "agent"),
+    [
+        ("issue/102-an-old-title", "issue-102"),
+        ("issue/101_102-notional-issue-title", "issue-101_102"),
+        ("issue/7_102_9-x", "issue-7_102_9"),
+    ],
+)
+def test_an_issue_already_in_a_worktree_launches_nothing(harness, branch, agent):
+    worktrees = [{"branch": branch, "path": "/wt/existing"}]
+    proc, calls = harness.run(
+        "101", "102", issues={"101": OPEN, "102": OPEN}, worktrees=worktrees
+    )
+    assert proc.returncode == 1
+    assert "Issue #102 already has a worktree." in proc.stderr
+    assert f"Agent:     {agent} (not running)" in proc.stderr
+    assert launched_nothing(calls)
+
+
+def test_a_single_issue_inside_a_combined_worktree_is_refused(harness):
+    worktrees = [{"branch": "issue/101_102-notional-issue-title", "path": "/wt/existing"}]
+    proc, calls = harness.run("102", issues={"102": OPEN}, worktrees=worktrees)
+    assert proc.returncode == 1
+    assert "Issue #102 already has a worktree." in proc.stderr
+    assert launched_nothing(calls)
+
+
+@pytest.mark.parametrize(
+    "branch", ["issue/1020-x", "issue/12-102-errors", "feature/102-x", "main"]
+)
+def test_other_branches_do_not_hold_the_issue(harness, branch):
+    worktrees = [{"branch": branch, "path": "/wt/other"}, {"path": "/wt/detached"}]
+    proc, calls = harness.run("102", issues={"102": OPEN}, worktrees=worktrees)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert agents_started(calls) == ["issue-102"]
+
+
+def test_issue_url_template_refuses_several_issues(harness):
+    use_template(harness, "Work on {{ISSUE_URL}}.\n")
+    proc, calls = harness.run("101", "102", issues={"101": OPEN, "102": OPEN})
+    assert proc.returncode == 1
+    assert "use {{ISSUES}}" in proc.stderr
+    assert launched_nothing(calls)
+
+
+@pytest.mark.parametrize(
+    ("numbers", "listed"),
+    [
+        (("101", "102"), f"{URL.format(101)} and {URL.format(102)}"),
+        (("101", "102", "103"), f"{URL.format(101)}, {URL.format(102)} and {URL.format(103)}"),
+    ],
+)
+def test_multi_sections_and_issue_list(harness, numbers, listed):
+    use_template(harness, "{{#multi}}\nM\n{{/multi}}\n{{^multi}}\nS\n{{/multi}}\n{{ISSUES}}\n")
+    proc, calls = harness.run(*numbers, issues={n: OPEN for n in numbers})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert prompt_sent(calls) == f"M\n{listed}"
