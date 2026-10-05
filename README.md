@@ -14,7 +14,8 @@ together, in one worktree, session and PR.
 The issues get one worktree, branched from the remote default branch, with an
 `agent` tab running Claude Code and a spare `shell` tab. One issue gets the
 branch `issue/<N>-<slug>`; several get `issue/<N>_<N>...-<slug>`, the slug
-taken from the first issue's title. The session is given the prompt in
+taken from the first issue's title. The agent name keeps as many leading
+numbers as fit Herdr's 32-character limit. The session is given the prompt in
 `plugins/herdr-issue/prompts/autonomous-issue.md` and every issue is assigned
 to you. If any issue already has a worktree, alone or with others, or is not
 open, nothing is launched and every problem is reported.
@@ -54,8 +55,9 @@ are launched, `multi`.
 
 `{{ISSUES}}` becomes the issue URLs as one phrase (`A`, `A and B`,
 `A, B and C`) and `{{DEFAULT_BRANCH}}` the remote default branch.
-`{{ISSUE_URL}}` names a single issue: a template that still uses it outside a
-`{{^multi}}` section refuses to launch several issues.
+`{{ISSUE_URL}}` names a single issue: a template refuses to launch several
+issues when `{{ISSUE_URL}}` would reach the prompt; keep it inside a
+`{{^multi}}` section.
 
 ## Tests
 

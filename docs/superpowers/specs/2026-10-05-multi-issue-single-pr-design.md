@@ -31,6 +31,12 @@ For a single issue every name is unchanged. For several, in the order given:
 | Settings file  | `issue-12.settings.json`| `issue-12_15_17.settings.json`        |
 | Herdr label    | `#12 <title>`           | `#12 #15 #17 <first title>`           |
 
+Herdr caps agent names at 32 characters, so the agent name drops trailing
+`_<N>` segments until it fits (one number always fits); the branch and
+settings file keep every number. Two launches can only end up with the same
+shortened name when they share their first issue, which the worktree check
+refuses.
+
 The slug comes from the first issue's title. `_` keeps the number list
 unambiguous when a slug itself starts with digits.
 
@@ -41,7 +47,7 @@ A worktree's issues are read from its branch with
 that list for any worktree. An old single-issue branch parses as a list of
 one, and `/issue 15` notices #15 inside `issue/12_15-…`. The "already
 running" check derives the agent name from that branch's list
-(`issue-` + numbers joined by `_`).
+(`issue-` + numbers joined by `_`, shortened by the same rule).
 
 ### After the session starts
 
@@ -79,8 +85,8 @@ section (or has none open), and a section still open at end of file.
   `A, B and C`.
 - `{{ISSUE_URL}}`: the issue URL when one issue is launched. When several are
   launched and `{{ISSUE_URL}}` survives into the rendered prompt, the launch
-  aborts before creating anything with: the template does not support
-  multiple issues; use `{{ISSUES}}`. This keeps an older per-repository
+  aborts before creating anything with: `<template> line <N>: {{ISSUE_URL}}
+  names a single issue; use {{ISSUES}} to launch several`. This keeps an older per-repository
   template from silently working only the first issue.
 - `{{DEFAULT_BRANCH}}`: unchanged.
 

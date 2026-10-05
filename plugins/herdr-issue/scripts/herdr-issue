@@ -26,6 +26,7 @@ for arg in "$@"; do
                 ;;
             *)
                 [[ "$token" =~ ^[0-9]+$ ]] || usage
+                token=$((10#$token))
                 # A number listed twice is launched once.
                 [[ " ${issues[*]} " == *" $token "* ]] || issues+=("$token")
                 ;;
@@ -36,6 +37,18 @@ done
 if [[ ${#issues[@]} -eq 0 ]]; then
     usage
 fi
+
+# The agent name for issue numbers joined by "_": issue-12_15_17, with
+# trailing numbers dropped until it fits. Herdr caps names at 32 characters;
+# two launches can only end up with the same shortened name when they share
+# their first issue, which the worktree check refuses.
+agent_name_for() {
+    local ids="$1"
+    while [[ ${#ids} -gt 26 && "$ids" == *_* ]]; do
+        ids="${ids%_*}"
+    done
+    echo "issue-${ids}"
+}
 
 repo="$(git rev-parse --show-toplevel)"
 
@@ -67,7 +80,7 @@ for n in "${issues[@]}"; do
             first(
                 .result.worktrees[]
                 | select(any(issue_numbers[]; . == $n))
-                | . + {agent: ("issue-" + (issue_numbers | join("_")))}
+                | . + {ids: (issue_numbers | join("_"))}
             ) // empty
         ' <<<"$worktrees"
     )"
@@ -76,7 +89,7 @@ for n in "${issues[@]}"; do
         wt_branch="$(jq -r '.branch' <<<"$existing")"
         wt_path="$(jq -r '.path' <<<"$existing")"
         wt_workspace="$(jq -r '.open_workspace_id // empty' <<<"$existing")"
-        wt_agent="$(jq -r '.agent' <<<"$existing")"
+        wt_agent="$(agent_name_for "$(jq -r '.ids' <<<"$existing")")"
         agent_status="$(
             herdr agent list |
                 jq -r --arg name "$wt_agent" \
@@ -345,7 +358,7 @@ herdr pane wait-output "$pane_id" \
     --match "herdr-issue-ready" \
     --timeout 30000 >/dev/null
 
-agent_name="issue-${ids}"
+agent_name="$(agent_name_for "$ids")"
 
 # The shell can still be redrawing its prompt after the marker prints, and
 # `agent start` refuses a pane that is not at an idle prompt, so retry while

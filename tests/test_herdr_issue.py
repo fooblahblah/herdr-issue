@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(shutil.which("jq") is None, reason="herdr-issue 
 
 # One stub serves git, gh and herdr; it dispatches on the name it was invoked as.
 STUB = r"""#!{python}
-import json, os, sys
+import json, os, re, sys
 
 tool = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
@@ -67,8 +67,10 @@ elif tool == "herdr":
             "tab": {"tab_id": "t1"},
             "root_pane": {"pane_id": "p1"},
         }}))
+    elif args[:2] == ["agent", "start"] and not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", args[2]):
+        sys.exit(f"invalid_agent_name: {args[2]}")
     # status server, tab rename/create, pane run/wait-output and
-    # agent start/prompt all succeed silently.
+    # agent list/prompt all succeed silently.
 """
 
 OPEN = {"state": "OPEN", "title": "Notional issue title"}
@@ -475,3 +477,43 @@ def test_one_issue_is_not_told_about_several(harness):
     assert "These issues are fixed together" not in prompt
     assert prompt.startswith(f"Let's start working on {URL.format(101)}.\n\n")
     assert "\n\n\n" not in prompt
+
+
+def test_agent_name_drops_trailing_numbers_to_fit_herdr(harness):
+    numbers = ("2696", "2697", "2718", "2719", "2720", "2721")
+    proc, calls = harness.run(*numbers, issues={n: OPEN for n in numbers})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert agents_started(calls) == ["issue-2696_2697_2718_2719_2720"]
+    create = created_worktree(calls)
+    branch = create[create.index("--branch") + 1]
+    assert branch.startswith("issue/2696_2697_2718_2719_2720_2721-")
+
+
+def test_an_existing_long_worktree_reports_the_shortened_agent(harness):
+    branch = "issue/2696_2697_2718_2719_2720_2721-notional-issue-title"
+    worktrees = [{"branch": branch, "path": "/wt/existing"}]
+    proc, calls = harness.run("2718", issues={"2718": OPEN}, worktrees=worktrees)
+    assert proc.returncode == 1
+    assert "Agent:     issue-2696_2697_2718_2719_2720 (not running)" in proc.stderr
+
+
+def test_issue_url_inside_a_hidden_section_does_not_refuse_several_issues(harness):
+    use_template(harness, "{{^multi}}\nOne {{ISSUE_URL}}\n{{/multi}}\n{{ISSUES}}\n")
+    proc, calls = harness.run("101", "102", issues={"101": OPEN, "102": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert prompt_sent(calls) == f"{URL.format(101)} and {URL.format(102)}"
+
+
+def test_leading_zeros_name_the_same_issue(harness):
+    proc, calls = harness.run("101", "0101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert agents_started(calls) == ["issue-101"]
+    assert [c[3] for c in calls if c[:3] == ["gh", "issue", "edit"]] == ["101"]
+
+
+def test_a_single_issue_failure_does_not_claim_a_group_launch(harness):
+    proc, calls = harness.run("101", issues={"101": CLOSED})
+    assert proc.returncode == 1
+    assert "Issue #101 is not open (CLOSED)." in proc.stderr
+    assert "Nothing was launched" not in proc.stderr
+    assert launched_nothing(calls)
