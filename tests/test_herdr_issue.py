@@ -456,3 +456,22 @@ def test_multi_sections_and_issue_list(harness, numbers, listed):
     proc, calls = harness.run(*numbers, issues={n: OPEN for n in numbers})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert prompt_sent(calls) == f"M\n{listed}"
+
+
+def test_several_issues_are_told_they_share_one_pr(harness):
+    proc, calls = harness.run("101", "102", issues={"101": OPEN, "102": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    prompt = prompt_sent(calls)
+    assert "{{" not in prompt
+    assert "These issues are fixed together, on one branch and in one draft PR." in prompt
+    assert "one `Closes #N` line per issue." in prompt
+    assert "Ensure the PR closes every referenced issue." in prompt
+
+
+def test_one_issue_is_not_told_about_several(harness):
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    prompt = prompt_sent(calls)
+    assert "These issues are fixed together" not in prompt
+    assert prompt.startswith(f"Let's start working on {URL.format(101)}.\n\n")
+    assert "\n\n\n" not in prompt

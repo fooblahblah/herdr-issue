@@ -1,7 +1,8 @@
 # herdr-issue
 
-A Claude Code plugin that launches GitHub issues autonomously, each in its own
-Herdr worktree and Claude Code session.
+A Claude Code plugin that launches GitHub issues autonomously in a Herdr
+worktree and Claude Code session. Several issues named together are fixed
+together, in one worktree, session and PR.
 
 ```
 /herdr-issue:issue 123
@@ -10,11 +11,13 @@ Herdr worktree and Claude Code session.
 /herdr-issue:issue 123 --ultracode
 ```
 
-Each issue gets a worktree on `issue/<N>-<slug>`, branched from the remote
-default branch, with an `agent` tab running Claude Code and a spare `shell`
-tab. The session is given the prompt in
-`plugins/herdr-issue/prompts/autonomous-issue.md` and the issue is assigned to
-you. An issue that already has a worktree, or is not open, is skipped.
+The issues get one worktree, branched from the remote default branch, with an
+`agent` tab running Claude Code and a spare `shell` tab. One issue gets the
+branch `issue/<N>-<slug>`; several get `issue/<N>_<N>...-<slug>`, the slug
+taken from the first issue's title. The session is given the prompt in
+`plugins/herdr-issue/prompts/autonomous-issue.md` and every issue is assigned
+to you. If any issue already has a worktree, alone or with others, or is not
+open, nothing is launched and every problem is reported.
 
 There are three modes, and the launch summary names the one used:
 
@@ -43,9 +46,16 @@ session.
 ## Per-repository prompt
 
 A repository that carries `.claude/prompts/autonomous-issue.md` uses that
-template instead of the plugin's. Lines `{{#superpowers}}` ... `{{/superpowers}}`,
-`{{#plain}}` ... `{{/plain}}` and `{{#ultracode}}` ... `{{/ultracode}}` mark
-mode-specific text; `{{ISSUE_URL}}` and `{{DEFAULT_BRANCH}}` are substituted.
+template instead of the plugin's. A line `{{#name}}` keeps the lines up to the
+matching `{{/name}}` when `name` is active, and `{{^name}}` keeps them when it
+is not; sections nest and each marker sits on its own line. The active names
+are the mode (`superpowers`, `plain` or `ultracode`) and, when several issues
+are launched, `multi`.
+
+`{{ISSUES}}` becomes the issue URLs as one phrase (`A`, `A and B`,
+`A, B and C`) and `{{DEFAULT_BRANCH}}` the remote default branch.
+`{{ISSUE_URL}}` names a single issue: a template that still uses it outside a
+`{{^multi}}` section refuses to launch several issues.
 
 ## Tests
 

@@ -1,4 +1,13 @@
 Let's start working on {{ISSUES}}.
+{{#multi}}
+
+These issues are fixed together, on one branch and in one draft PR. Wherever
+this prompt says "the issue", it means each of them: every issue's
+requirements and acceptance criteria must be met. The PR description carries
+one `Closes #N` line per issue. If one of them turns out to be separate work
+that cannot reasonably share this PR, stop and say so rather than dropping or
+splitting it off yourself.
+{{/multi}}
 
 {{#superpowers}}
 Work the issue autonomously through completion using the normal Superpowers
@@ -136,8 +145,8 @@ committing to one.
 {{/ultracode}}
 
 Create a draft PR early, after the first substantive commit, so the PR serves
-as the active tracking artifact. Create it with `--assignee @me`. Ensure the
-PR closes the referenced issue.
+as the active tracking artifact. Create it with `--assignee @me`.
+Ensure the PR closes every referenced issue.
 
 Continue autonomously through:
 - implementation and appropriate regression tests;
@@ -174,7 +183,7 @@ Own the PR through completion:
 - never bypass required checks, reviews, branch protection, or merge queues;
 - mark the draft PR ready when appropriate;
 - merge using the repository's normal strategy once all requirements pass;
-- verify the PR is merged and the referenced issue is closed.
+- verify the PR is merged and every referenced issue is closed.
 
 Once the PR is merged, always finish with both of these steps. If the session
 ends without a merge, leave the branch and `{{DEFAULT_BRANCH}}` as they are.
