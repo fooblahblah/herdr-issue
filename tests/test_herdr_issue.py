@@ -20,7 +20,9 @@ import pytest
 PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugins" / "herdr-issue"
 SCRIPT = PLUGIN_ROOT / "scripts" / "herdr-issue"
 
-pytestmark = pytest.mark.skipif(shutil.which("jq") is None, reason="herdr-issue needs jq")
+pytestmark = pytest.mark.skipif(
+    shutil.which("jq") is None, reason="herdr-issue needs jq"
+)
 
 # One stub serves git, gh and herdr; it dispatches on the name it was invoked as.
 STUB = r"""#!{python}
@@ -94,7 +96,11 @@ class Harness:
         self.log = tmp_path / "calls.jsonl"
 
     def run(
-        self, *args: str, issues: dict, origin_head: str = "", worktrees: list | None = None
+        self,
+        *args: str,
+        issues: dict,
+        origin_head: str = "",
+        worktrees: list | None = None,
     ) -> tuple[subprocess.CompletedProcess, list]:
         env = {
             **os.environ,
@@ -121,7 +127,9 @@ class Harness:
 
     def enable_plugins(self, plugins: dict) -> None:
         self.config_dir.mkdir(exist_ok=True)
-        (self.config_dir / "settings.json").write_text(json.dumps({"enabledPlugins": plugins}))
+        (self.config_dir / "settings.json").write_text(
+            json.dumps({"enabledPlugins": plugins})
+        )
 
 
 @pytest.fixture
@@ -176,7 +184,9 @@ def test_effort_is_never_exported_into_the_pane(harness):
     assert not any("CLAUDE_CODE_EFFORT_LEVEL" in cmd for cmd in typed)
 
 
-@pytest.mark.parametrize(("args", "routed"), [(("101",), True), (("101", "--ultracode"), False)])
+@pytest.mark.parametrize(
+    ("args", "routed"), [(("101",), True), (("101", "--ultracode"), False)]
+)
 def test_only_the_high_effort_session_routes_its_final_review_to_final_reviewer(
     harness, args, routed
 ):
@@ -220,7 +230,9 @@ def test_a_repository_template_replaces_the_plugin_one(harness):
     )
 
 
-@pytest.mark.parametrize(("origin_head", "base"), [("", "main"), ("origin/trunk", "trunk")])
+@pytest.mark.parametrize(
+    ("origin_head", "base"), [("", "main"), ("origin/trunk", "trunk")]
+)
 def test_issue_branches_from_the_remote_default_branch(harness, origin_head, base):
     proc, calls = harness.run("101", issues={"101": OPEN}, origin_head=origin_head)
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -327,7 +339,9 @@ def test_template_mistakes_launch_nothing(harness, text, error):
 def test_values_are_substituted_literally(harness):
     # A ref name may hold & and |, which sed's s||| would misread.
     use_template(harness, "{{DEFAULT_BRANCH}} {{ISSUES}}\n")
-    proc, calls = harness.run("101", issues={"101": OPEN}, origin_head="origin/re&l|ease")
+    proc, calls = harness.run(
+        "101", issues={"101": OPEN}, origin_head="origin/re&l|ease"
+    )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert prompt_sent(calls) == f"re&l|ease {URL.format(101)}"
 
@@ -361,7 +375,9 @@ def test_several_issues_share_one_session(harness):
     edits = [c[3] for c in calls if c[:3] == ["gh", "issue", "edit"]]
     assert edits == ["101", "102"]
     assert proc.stdout.startswith("Launched issues #101 #102\n")
-    assert f"Issue:     {URL.format(101)}\nIssue:     {URL.format(102)}\n" in proc.stdout
+    assert (
+        f"Issue:     {URL.format(101)}\nIssue:     {URL.format(102)}\n" in proc.stdout
+    )
     assert prompt_sent(calls).startswith(
         f"Let's start working on {URL.format(101)} and {URL.format(102)}.\n"
     )
@@ -421,7 +437,9 @@ def test_an_issue_already_in_a_worktree_launches_nothing(harness, branch, agent)
 
 
 def test_a_single_issue_inside_a_combined_worktree_is_refused(harness):
-    worktrees = [{"branch": "issue/101_102-notional-issue-title", "path": "/wt/existing"}]
+    worktrees = [
+        {"branch": "issue/101_102-notional-issue-title", "path": "/wt/existing"}
+    ]
     proc, calls = harness.run("102", issues={"102": OPEN}, worktrees=worktrees)
     assert proc.returncode == 1
     assert "Issue #102 already has a worktree." in proc.stderr
@@ -450,11 +468,16 @@ def test_issue_url_template_refuses_several_issues(harness):
     ("numbers", "listed"),
     [
         (("101", "102"), f"{URL.format(101)} and {URL.format(102)}"),
-        (("101", "102", "103"), f"{URL.format(101)}, {URL.format(102)} and {URL.format(103)}"),
+        (
+            ("101", "102", "103"),
+            f"{URL.format(101)}, {URL.format(102)} and {URL.format(103)}",
+        ),
     ],
 )
 def test_multi_sections_and_issue_list(harness, numbers, listed):
-    use_template(harness, "{{#multi}}\nM\n{{/multi}}\n{{^multi}}\nS\n{{/multi}}\n{{ISSUES}}\n")
+    use_template(
+        harness, "{{#multi}}\nM\n{{/multi}}\n{{^multi}}\nS\n{{/multi}}\n{{ISSUES}}\n"
+    )
     proc, calls = harness.run(*numbers, issues={n: OPEN for n in numbers})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert prompt_sent(calls) == f"M\n{listed}"
@@ -465,7 +488,9 @@ def test_several_issues_are_told_they_share_one_pr(harness):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     prompt = prompt_sent(calls)
     assert "{{" not in prompt
-    assert "These issues are fixed together, on one branch and in one draft PR." in prompt
+    assert (
+        "These issues are fixed together, on one branch and in one draft PR." in prompt
+    )
     assert "one `Closes #N` line per issue." in prompt
     assert "Ensure the PR closes every referenced issue." in prompt
 
@@ -495,6 +520,7 @@ def test_an_existing_long_worktree_reports_the_shortened_agent(harness):
     proc, calls = harness.run("2718", issues={"2718": OPEN}, worktrees=worktrees)
     assert proc.returncode == 1
     assert "Agent:     issue-2696_2697_2718_2719_2720 (not running)" in proc.stderr
+    assert launched_nothing(calls)
 
 
 def test_issue_url_inside_a_hidden_section_does_not_refuse_several_issues(harness):
