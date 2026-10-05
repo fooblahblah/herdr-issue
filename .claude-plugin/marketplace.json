@@ -8,7 +8,7 @@
     {
       "name": "herdr-issue",
       "source": "./plugins/herdr-issue",
-      "description": "Launch GitHub issues autonomously, each in its own Herdr worktree and Claude Code session"
+      "description": "Launch GitHub issues autonomously in a Herdr worktree and Claude Code session; several issues named together share one worktree, session and PR"
     }
   ]
 }
