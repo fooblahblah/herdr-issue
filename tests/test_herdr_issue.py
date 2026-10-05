@@ -307,3 +307,71 @@ def test_several_issues_pass_the_plain_flag_to_each(harness):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert proc.stdout.count("Mode:      plain\n") == 2
     assert all("--settings" in start for start in agent_starts(calls))
+
+
+def use_template(harness, text: str) -> None:
+    override = harness.repo / ".claude" / "prompts" / "autonomous-issue.md"
+    override.parent.mkdir(parents=True, exist_ok=True)
+    override.write_text(text)
+
+
+URL = "https://github.com/example/notional/issues/{}"
+
+NESTED = """\
+A
+{{#plain}}
+B
+{{^multi}}
+C
+{{/multi}}
+{{#multi}}
+D
+{{/multi}}
+{{/plain}}
+{{#ultracode}}
+E
+{{^multi}}
+F
+{{/multi}}
+{{/ultracode}}
+G {{ISSUES}}
+"""
+
+
+def test_sections_nest_and_invert(harness):
+    use_template(harness, NESTED)
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert prompt_sent(calls) == f"A\nB\nC\nG {URL.format(101)}"
+
+
+@pytest.mark.parametrize(
+    ("text", "error"),
+    [
+        ("{{#bogus}}\nx\n{{/bogus}}\n", "line 1: unknown section {{#bogus}}"),
+        ("{{#plain}}\nx\n{{/ultracode}}\n", "line 3: unmatched {{/ultracode}}"),
+        ("{{/plain}}\n", "line 1: unmatched {{/plain}}"),
+        ("{{^multi}}\nx\n", "line 2: {{^multi}} is never closed"),
+    ],
+)
+def test_template_mistakes_launch_nothing(harness, text, error):
+    use_template(harness, text)
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 1
+    assert error in proc.stderr
+    assert not any(c[:3] == ["herdr", "worktree", "create"] for c in calls)
+    assert agent_starts(calls) == []
+
+
+def test_values_are_substituted_literally(harness):
+    # A ref name may hold & and |, which sed's s||| would misread.
+    use_template(harness, "{{DEFAULT_BRANCH}} {{ISSUES}}\n")
+    proc, calls = harness.run("101", issues={"101": OPEN}, origin_head="origin/re&l|ease")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert prompt_sent(calls) == f"re&l|ease {URL.format(101)}"
+
+
+def test_plugin_prompt_opens_with_the_issue(harness):
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert prompt_sent(calls).startswith(f"Let's start working on {URL.format(101)}.\n")

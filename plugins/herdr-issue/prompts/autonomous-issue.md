@@ -1,4 +1,4 @@
-Let's start working on {{ISSUE_URL}}.
+Let's start working on {{ISSUES}}.
 
 {{#superpowers}}
 Work the issue autonomously through completion using the normal Superpowers

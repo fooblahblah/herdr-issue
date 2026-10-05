@@ -152,6 +152,7 @@ issue_json="$(
 title="$(jq -r '.title' <<<"$issue_json")"
 state="$(jq -r '.state' <<<"$issue_json")"
 issue_url="$(jq -r '.url' <<<"$issue_json")"
+urls=("$issue_url")
 
 if [[ "$state" != "OPEN" ]]; then
     echo "Issue #$issue is not open ($state)." >&2
@@ -159,8 +160,9 @@ if [[ "$state" != "OPEN" ]]; then
 fi
 
 # Build the prompt before creating anything, so a template mistake leaves no
-# worktree behind. The template marks mode-specific text with {{#<mode>}} and
-# {{/<mode>}} lines; text outside a section goes to every mode.
+# worktree behind. Section lines nest: {{#name}} keeps the lines up to its
+# {{/name}} when name is active, and {{^name}} keeps them when it is not. The
+# active names are the mode and, when several issues are launched, multi.
 # A repository can carry its own template at
 # .claude/prompts/autonomous-issue.md; otherwise the plugin's is used.
 template="$repo/.claude/prompts/autonomous-issue.md"
@@ -174,33 +176,75 @@ base="$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD || 
 base="${base#origin/}"
 base="${base:-main}"
 
+multi=""
+if [[ ${#issues[@]} -gt 1 ]]; then
+    multi=1
+fi
+
+# The issue URLs as one phrase for {{ISSUES}}: "A", "A and B", "A, B and C".
+issues_text="${urls[0]}"
+for ((i = 1; i < ${#urls[@]}; i++)); do
+    if ((i == ${#urls[@]} - 1)); then
+        issues_text+=" and ${urls[i]}"
+    else
+        issues_text+=", ${urls[i]}"
+    fi
+done
+
+# Values reach awk through the environment and are replaced literally, so no
+# value is ever read as a pattern or an escape.
 prompt="$(
-    awk -v mode="$mode" '
+    MODE="$mode" MULTI="$multi" ISSUES="$issues_text" ISSUE_URL="${urls[0]}" \
+        DEFAULT_BRANCH="$base" awk '
         function fail(msg) {
             printf "%s line %d: %s\n", FILENAME, FNR, msg > "/dev/stderr"
             bad = 1
             exit 1
         }
-        /^[{][{]#[a-z]+[}][}]$/ {
-            if (section != "") fail("section opened inside {{#" section "}}")
-            section = substr($0, 4, length($0) - 5)
-            if (section !~ /^(superpowers|plain|ultracode)$/) fail("unknown section " $0)
+        function replace(s, from, to,    out, i) {
+            out = ""
+            while ((i = index(s, from)) > 0) {
+                out = out substr(s, 1, i - 1) to
+                s = substr(s, i + length(from))
+            }
+            return out s
+        }
+        BEGIN {
+            split("superpowers plain ultracode multi", names, " ")
+            for (i in names) known[names[i]] = 1
+            active[ENVIRON["MODE"]] = 1
+            if (ENVIRON["MULTI"] != "") active["multi"] = 1
+        }
+        $0 ~ "^[{][{][#^/][a-z]+[}][}]$" {
+            sigil = substr($0, 3, 1)
+            name = substr($0, 4, length($0) - 5)
+            if (!(name in known)) fail("unknown section " $0)
+            if (sigil == "/") {
+                if (depth == 0 || sec_name[depth] != name) fail("unmatched " $0)
+                if (!sec_keep[depth]) hidden--
+                depth--
+            } else {
+                depth++
+                sec_name[depth] = name
+                sec_sigil[depth] = sigil
+                sec_keep[depth] = ((name in active) == (sigil == "#"))
+                if (!sec_keep[depth]) hidden++
+            }
             next
         }
-        /^[{][{]\/[a-z]+[}][}]$/ {
-            if (substr($0, 4, length($0) - 5) != section) fail("unmatched " $0)
-            section = ""
-            next
+        hidden == 0 {
+            if (ENVIRON["MULTI"] != "" && index($0, "{{ISSUE_URL}}"))
+                fail("{{ISSUE_URL}} names a single issue; use {{ISSUES}} to launch several")
+            line = replace($0, "{{ISSUES}}", ENVIRON["ISSUES"])
+            line = replace(line, "{{ISSUE_URL}}", ENVIRON["ISSUE_URL"])
+            print replace(line, "{{DEFAULT_BRANCH}}", ENVIRON["DEFAULT_BRANCH"])
         }
-        section == "" || section == mode
         END {
             if (bad) exit 1
-            if (section != "") fail("{{#" section "}} is never closed")
+            if (depth > 0) fail("{{" sec_sigil[depth] sec_name[depth] "}} is never closed")
         }
-    ' "$template" |
-        sed -e "s|{{ISSUE_URL}}|${issue_url}|g" -e "s|{{DEFAULT_BRANCH}}|${base}|g"
+    ' "$template"
 )"
-
 # "ultracode" anywhere in a prompt opts that turn into workflows, so only the
 # ultracode prompt may contain the word.
 if [[ "$mode" != ultracode ]] && grep -qi ultracode <<<"$prompt"; then
