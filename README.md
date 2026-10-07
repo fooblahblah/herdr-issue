@@ -7,6 +7,7 @@ together, in one worktree, session and PR.
 ```
 /herdr-issue:issue 123
 /herdr-issue:issue 123 124, 125
+/herdr-issue:issue #123, #124, #125
 /herdr-issue:issue 123 --plain
 /herdr-issue:issue 123 --ultracode
 ```

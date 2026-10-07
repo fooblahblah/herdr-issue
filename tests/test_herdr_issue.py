@@ -154,7 +154,16 @@ def test_single_issue_keeps_the_existing_output(harness):
 
 
 @pytest.mark.parametrize(
-    "args", [("101", "1o2"), ("--ultracode",), ("",), ("101", "--plain", "--ultracode")]
+    "args",
+    [
+        ("101", "1o2"),
+        ("--ultracode",),
+        ("",),
+        ("101", "--plain", "--ultracode"),
+        ("#",),
+        ("##101",),
+        ("101#",),
+    ],
 )
 def test_bad_or_missing_issue_numbers_launch_nothing(harness, args):
     proc, calls = harness.run(*args, issues={"101": OPEN})
@@ -391,6 +400,14 @@ def test_single_string_form_splits_and_applies_ultracode(harness):
     path = harness.repo / ".git" / "herdr-issue" / "issue-101_102.settings.json"
     assert start[start.index("--settings") + 1] == str(path)
     assert json.loads(path.read_text())["ultracode"] is True
+
+
+def test_hash_prefixed_list_names_the_issues(harness):
+    issues = {"111": OPEN, "123": OPEN, "125": OPEN}
+    proc, calls = harness.run("#123, #125, #111", issues=issues)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert agents_started(calls) == ["issue-123_125_111"]
+    assert proc.stdout.startswith("Launched issues #123 #125 #111\n")
 
 
 def test_several_issues_take_the_plain_flag(harness):
