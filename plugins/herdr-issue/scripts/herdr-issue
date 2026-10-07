@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
     echo "usage: herdr-issue <issue-number>... [--plain | --ultracode]" >&2
-    echo "Issue numbers may be separated by spaces or commas." >&2
+    echo "Issue numbers may be separated by spaces or commas, and may start with #." >&2
     exit 2
 }
 
@@ -25,6 +25,8 @@ for arg in "$@"; do
                 mode="${token#--}"
                 ;;
             *)
+                # Accept GitHub's #123 form, as in "#123, #125, #111".
+                token="${token#\#}"
                 [[ "$token" =~ ^[0-9]+$ ]] || usage
                 token=$((10#$token))
                 # A number listed twice is launched once.
