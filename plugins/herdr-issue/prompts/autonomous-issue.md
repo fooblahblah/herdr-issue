@@ -62,8 +62,15 @@ directly, rather than letting them inherit Opus 5.5 simply because it is the
 parent model.
 {{/ultracode}}
 
-Use Sonnet 5 by default for:
-- mechanical implementation tasks;
+Use Haiku 5.5 for:
+- transcription tasks, where the plan already contains the complete code to
+  write and the work is applying it and running the tests;
+- single-file mechanical fixes.
+The cheapest models take more turns on multi-step work, so do not use Haiku
+5.5 for reviews or for implementing from prose descriptions.
+
+Use Sonnet 5.5 by default for:
+- other mechanical implementation tasks;
 - localized 1-2 file changes with clear requirements;
 - straightforward regression tests;
 - repetitive or same-shape edits;
