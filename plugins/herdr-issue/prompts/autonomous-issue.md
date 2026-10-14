@@ -41,6 +41,34 @@ issue only to record that something was not fixed. In your final message,
 name every issue you opened and give one line on why it could not go in this
 PR.
 
+CUSTOMER-FACING CHANGES
+
+While understanding the issue, decide whether the change is customer-facing:
+whether it changes anything a customer can see or do that a person could check
+by hand, such as the UI, pages, emails or notifications, public API responses,
+or CLI output. Purely backend work with no change a customer could observe
+(internal refactors, background processing, data plumbing, build and CI,
+tests, developer tooling) is not. When in doubt, treat it as customer-facing.
+With several issues, the PR is customer-facing if any of them is. Give the
+classification and the reason in one line of the PR description.
+
+For a customer-facing change, give the PR description a "Manual verification"
+section, kept current as the work changes:
+- Setup: how to run the app or reach the path, and any account, data,
+  configuration, or feature flag it needs;
+- Before the fix: steps that reproduce the issue on `{{DEFAULT_BRANCH}}`, and what goes
+  wrong;
+- After the fix: the same steps on this branch, and what happens instead;
+- Also check: edge cases and nearby screens or flows this change could affect.
+Write the steps for a person who has not read the code: concrete URLs,
+routes, commands, inputs, and expected results. Say which steps you ran
+yourself and what you saw, and which you could not run. Put the before-the-fix
+steps in the draft PR as soon as you have reproduced the issue, so it can be
+checked while the fix is in progress.
+
+For a backend change, the regression test is the reproduction: name it in the
+PR description and say that it fails on `{{DEFAULT_BRANCH}}`.
+
 MODEL / SUBAGENT ROUTING
 
 Use Opus 5.5 as the parent coordinator.
@@ -130,7 +158,8 @@ complexity, follow the appropriate Superpowers design and planning workflow.
 {{#plain}}
 Work in this order, keeping each step proportionate to the issue:
 1. Understand. Read the affected code and reproduce the problem, or confirm
-   the gap, before changing anything.
+   the gap, before changing anything. Decide whether the change is
+   customer-facing.
 2. Design. For bounded, well-specified issues, settle the approach in a few
    lines and move on. If the work is genuinely architectural or reveals
    substantial hidden complexity, write a short plan first (the approach, the
@@ -189,8 +218,15 @@ Own the PR through completion:
 - rerun appropriate verification after changes;
 - never bypass required checks, reviews, branch protection, or merge queues;
 - mark the draft PR ready when appropriate;
-- merge using the repository's normal strategy once all requirements pass;
+- merge using the repository's normal strategy once all requirements pass,
+  and, for a customer-facing change, once I have approved it;
 - verify the PR is merged and every referenced issue is closed.
+
+For a customer-facing change, stop before merging: once checks pass, reviews
+are done, and the PR is marked ready, end your turn with the manual
+verification steps and the PR link, and ask me to verify. When I approve,
+update from {{DEFAULT_BRANCH}} if needed, confirm checks still pass, and merge. If I report a
+problem, fix it, update the steps, and ask again.
 
 Once the PR is merged, always finish with both of these steps. If the session
 ends without a merge, leave the branch and `{{DEFAULT_BRANCH}}` as they are.
@@ -208,12 +244,14 @@ ends without a merge, leave the branch and `{{DEFAULT_BRANCH}}` as they are.
 
 You are authorized to create and push the branch, create and update the PR,
 update from {{DEFAULT_BRANCH}}, address CI failures, mark the PR ready, merge once all
-normal repository requirements are satisfied, and then delete the local branch
-and sync local `{{DEFAULT_BRANCH}}` as described above.
+normal repository requirements are satisfied (and, for a customer-facing
+change, once I have approved it), and then delete the local branch and sync
+local `{{DEFAULT_BRANCH}}` as described above.
 
 Do not ask me to choose implementation, review, model-routing, or execution
 strategies. Make those decisions yourself.
 
-Only stop for a genuine product/requirements ambiguity, a security-sensitive
-decision, an irreversible/destructive action outside the normal workflow, or
-something else that truly requires human judgment.
+Apart from the manual verification stop before merging a customer-facing
+change, only stop for a genuine product/requirements ambiguity, a
+security-sensitive decision, an irreversible/destructive action outside the
+normal workflow, or something else that truly requires human judgment.
