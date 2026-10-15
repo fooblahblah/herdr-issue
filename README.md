@@ -21,11 +21,14 @@ numbers as fit Herdr's 32-character limit. The session is given the prompt in
 to you. If any issue already has a worktree, alone or with others, or is not
 open, nothing is launched and every problem is reported.
 
-The session takes the PR through to merge on its own, except for a
-customer-facing change (UI, public API, CLI output, or anything else a
-customer could check by hand). There it marks the PR ready, gives steps to
-reproduce the issue on the default branch and to verify the fix on the
-branch, and merges only once you approve.
+The session takes the PR through to merge on its own. A customer-facing
+change (UI, public API, CLI output, or anything else a customer could check
+by hand) is first verified the way a customer would use it: in a headless
+browser through Playwright for UI, before and after the fix. When that is
+conclusive, the session merges. When it is not (the problem would not
+reproduce, the app would not run, or a criterion needs a person's judgment),
+the session marks the PR ready, says what it could and could not verify,
+gives steps for you to check the rest, and merges only once you approve.
 
 There are three modes, and the launch summary names the one used:
 

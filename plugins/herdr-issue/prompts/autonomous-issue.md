@@ -52,19 +52,45 @@ tests, developer tooling) is not. When in doubt, treat it as customer-facing.
 With several issues, the PR is customer-facing if any of them is. Give the
 classification and the reason in one line of the PR description.
 
-For a customer-facing change, give the PR description a "Manual verification"
-section, kept current as the work changes:
+For a customer-facing change, verify it yourself the way a customer would
+use it: in a browser for UI, by running the commands for CLI output, by
+sending the requests for an API. Run the before-the-fix steps while
+understanding the issue, before changing any code, and the after-the-fix
+steps once the change is reviewed:
+- Where the repository has end-to-end browser tests (Playwright, Cypress, or
+  similar), write the reproduction as one of them, see it fail before the
+  fix, and keep it as the regression test.
+- Otherwise, start the app and drive it with headless Playwright (through
+  `npx`, using an installed Chromium or Chrome where there is one) from a
+  script in your scratchpad directory, not committed. Read the screenshots
+  you take, and check the browser console for new errors.
+Start the app on a free port, since other sessions may be running theirs, and
+stop every server you started when you are done.
+
+Automated verification is conclusive when the before-the-fix run showed the
+problem (or the missing feature), the after-the-fix run showed the expected
+result for every acceptance criterion a customer could observe, the "Also
+check" items behaved, and no new console errors appeared. It is inconclusive
+when you could not reproduce the problem, the app or a path would not run
+(missing secrets, accounts, data, outside services, or hardware), results were
+flaky, or a criterion needs a person's judgment that screenshots cannot
+settle, such as look and feel or wording. Never count a weaker check as
+conclusive.
+
+Give the PR description a "Verification" section, kept current as the work
+changes:
 - Setup: how to run the app or reach the path, and any account, data,
   configuration, or feature flag it needs;
 - Before the fix: steps that reproduce the issue on `{{DEFAULT_BRANCH}}`, and what goes
   wrong;
 - After the fix: the same steps on this branch, and what happens instead;
-- Also check: edge cases and nearby screens or flows this change could affect.
+- Also check: edge cases and nearby screens or flows this change could affect;
+- Automated: what you ran, what you saw, and whether it was conclusive; for
+  anything inconclusive, why.
 Write the steps for a person who has not read the code: concrete URLs,
-routes, commands, inputs, and expected results. Say which steps you ran
-yourself and what you saw, and which you could not run. Put the before-the-fix
-steps in the draft PR as soon as you have reproduced the issue, so it can be
-checked while the fix is in progress.
+routes, commands, inputs, and expected results. Put the before-the-fix steps
+in the draft PR as soon as you have reproduced the issue, so it can be checked
+while the fix is in progress.
 
 For a backend change, the regression test is the reproduction: name it in the
 PR description and say that it fails on `{{DEFAULT_BRANCH}}`.
@@ -207,7 +233,8 @@ Continue autonomously through:
 {{#ultracode}}
 - final whole-branch review using Opus 5.5;
 {{/ultracode}}
-- fresh final verification.
+- fresh final verification, including the after-the-fix automated
+  verification of a customer-facing change.
 
 Own the PR through completion:
 - push meaningful progress;
@@ -218,15 +245,20 @@ Own the PR through completion:
 - rerun appropriate verification after changes;
 - never bypass required checks, reviews, branch protection, or merge queues;
 - mark the draft PR ready when appropriate;
-- merge using the repository's normal strategy once all requirements pass,
-  and, for a customer-facing change, once I have approved it;
+- merge using the repository's normal strategy once all requirements pass
+  and, for a customer-facing change, automated verification was conclusive or
+  I have approved it;
 - verify the PR is merged and every referenced issue is closed.
 
-For a customer-facing change, stop before merging: once checks pass, reviews
-are done, and the PR is marked ready, end your turn with the manual
-verification steps and the PR link, and ask me to verify. When I approve,
-update from {{DEFAULT_BRANCH}} if needed, confirm checks still pass, and merge. If I report a
-problem, fix it, update the steps, and ask again.
+If automated verification of a customer-facing change fails, fix the change
+and run it again; that is not a reason to stop. Stop before merging only when
+it is inconclusive: once checks pass, reviews are done, and the PR is marked
+ready, end your turn with what the automated verification covered and what it
+saw, what was inconclusive and why, the steps for me to check the rest by
+hand, and the PR link, and ask me to verify. When I approve, update from
+{{DEFAULT_BRANCH}} if needed, confirm checks still pass, and merge. If I report a problem,
+fix it, run the automated verification again, update the steps, and ask
+again.
 
 Once the PR is merged, always finish with both of these steps. If the session
 ends without a merge, leave the branch and `{{DEFAULT_BRANCH}}` as they are.
@@ -245,13 +277,13 @@ ends without a merge, leave the branch and `{{DEFAULT_BRANCH}}` as they are.
 You are authorized to create and push the branch, create and update the PR,
 update from {{DEFAULT_BRANCH}}, address CI failures, mark the PR ready, merge once all
 normal repository requirements are satisfied (and, for a customer-facing
-change, once I have approved it), and then delete the local branch and sync
-local `{{DEFAULT_BRANCH}}` as described above.
+change, once automated verification was conclusive or I have approved it),
+and then delete the local branch and sync local `{{DEFAULT_BRANCH}}` as described above.
 
 Do not ask me to choose implementation, review, model-routing, or execution
 strategies. Make those decisions yourself.
 
-Apart from the manual verification stop before merging a customer-facing
-change, only stop for a genuine product/requirements ambiguity, a
+Apart from the stop before merging a customer-facing change whose automated
+verification was inconclusive, only stop for a genuine product/requirements ambiguity, a
 security-sensitive decision, an irreversible/destructive action outside the
 normal workflow, or something else that truly requires human judgment.
