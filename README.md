@@ -38,16 +38,24 @@ between the PR and its merge, the session runs it under a Monitor:
 pr-land <PR> -- --squash
 ```
 
-About once a minute it checks the PR. When the default branch has moved and
-the repository requires branches to be up to date, it updates the branch at
-once, without waiting for the CI run in progress, and cancels the runs on the
-old head. Once every check on the current head passes, it merges with the
+Run from the PR's branch, it first waits for GitHub to show the local HEAD.
+It then checks the PR about once a minute. When the default branch has moved
+and the repository requires branches to be up to date (through branch
+protection, which only an admin can read, or a ruleset), it
+updates the branch at once, without waiting for the CI run in progress, and
+cancels the PR branch's runs on the old head. The update is always a merge
+commit, never a rebase. Once every check on the current head passes, required
+or not, counting only the latest attempt of a re-run check, it merges with the
 flags after `--`, which must name a merge method. It stops, with the reason on
-its last line, on failing checks, a merge conflict, a draft, or a block other
-than CI, and the session takes over. The lander runs apart from the command
-that started it and logs under `.git/herdr-issue/`; running the command again
-for the same PR follows the lander already running, so a Monitor can expire
-and be re-armed. It acts only while a session runs it.
+its last line, on checks that fail on two polls in a row, a merge conflict, a
+draft, checks pending for two hours, or a block other than CI, and the
+session takes over.
+
+The lander runs apart from the command that started it and logs under
+`.git/herdr-issue/`. Running the command again for the same PR follows the
+lander already running, so a Monitor can expire and be re-armed.
+`pr-land --stop <PR>` stops it, and it stops itself after an hour with
+nothing following it.
 
 There are three modes, and the launch summary names the one used:
 
