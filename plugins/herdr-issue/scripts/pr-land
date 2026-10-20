@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    echo "usage: pr-land [<pr-number>] -- <gh pr merge flags>" >&2
+    echo "The merge flags must name a merge method: --merge, --squash or --rebase." >&2
+    exit 2
+}
+
+# pr-land lands one PR: it keeps the branch current with its base, merges once
+# every check on the current head passes, and stops with the reason when a
+# person or the session has to act. The work is done by a lander running
+# apart from this command, which only follows the lander's log. A Monitor
+# that runs this command can expire and be re-armed without stopping the
+# lander: running it again for the same PR reattaches.
+#
+# Exit status: 0 once the PR is merged, 1 when the lander stopped without
+# merging (its last line says why), 2 for bad usage.
+
+# Seconds between polls of the PR. Tests shorten it.
+interval="${PR_LAND_INTERVAL:-60}"
+
+# The lander is this script again, started with --run.
+run=""
+if [[ "${1:-}" == --run ]]; then
+    run=1
+    shift
+fi
+
+pr=""
+if [[ $# -gt 0 && "$1" != -- ]]; then
+    pr="$1"
+    shift
+fi
+[[ "${1:-}" == -- ]] || usage
+shift
+merge_flags=("$@")
+
+method=""
+for flag in "${merge_flags[@]}"; do
+    case "$flag" in
+        -m | --merge | -s | --squash | -r | --rebase)
+            method=1
+            ;;
+        # The session deletes its own branch after the merge: gh's -d would
+        # also switch this worktree to the default branch, which another
+        # worktree usually has checked out. --auto and --admin hand the merge
+        # to GitHub or bypass its rules; pr-land does neither.
+        --admin | --auto | --disable-auto | -d | --delete-branch | --match-head-commit*)
+            echo "pr-land: ${flag} is not allowed; pr-land merges the PR itself." >&2
+            exit 2
+            ;;
+    esac
+done
+[[ -n "$method" ]] || usage
+
+self="$(realpath "${BASH_SOURCE[0]}")"
+
+if [[ -n "$run" ]]; then
+    n="$pr"
+else
+    # gh resolves a number, URL or branch, or the current branch's PR.
+    n="$(gh pr view ${pr:+"$pr"} --json number | jq -r '.number')"
+fi
+
+state_dir="$(git rev-parse --path-format=absolute --git-common-dir)/herdr-issue"
+log_file="${state_dir}/pr-land-${n}.log"
+pid_file="${state_dir}/pr-land-${n}.pid"
+status_file="${state_dir}/pr-land-${n}.status"
+err_file="${state_dir}/pr-land-${n}.err"
+
+if [[ -z "$run" ]]; then
+    mkdir -p "$state_dir"
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        echo "pr-land: following the lander already running for #${n} (pid ${pid});" \
+            "it keeps the merge flags it was started with."
+        # Its latest line, so a reattached Monitor knows where things stand.
+        tail -n 1 "$log_file"
+        offset="$(wc -c <"$log_file")"
+    else
+        : >"$log_file"
+        rm -f "$status_file"
+        # The lander gets its own process group (set -m) and is orphaned when
+        # the subshell exits, so a Monitor that kills this command and its
+        # children leaves it running.
+        (
+            set -m
+            nohup "$self" --run "$n" -- "${merge_flags[@]}" </dev/null >>"$log_file" 2>&1 &
+            echo "$!" >"$pid_file"
+        )
+        pid="$(cat "$pid_file")"
+        offset=0
+    fi
+
+    # Copy the log to stdout as it grows, until the lander exits.
+    while :; do
+        size="$(wc -c <"$log_file")"
+        if ((size > offset)); then
+            tail -c +$((offset + 1)) "$log_file" | head -c $((size - offset))
+            offset="$size"
+        fi
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+    done
+    tail -c +$((offset + 1)) "$log_file"
+
+    if [[ ! -f "$status_file" ]]; then
+        echo "pr-land: the lander for #${n} stopped without a result; run pr-land again."
+        exit 1
+    fi
+    exit "$(cat "$status_file")"
+fi
+
+# --- The lander -------------------------------------------------------------
+
+log() {
+    printf '%s #%s %s\n' "$(date +%H:%M:%S)" "$n" "$*"
+}
+
+# Waiting lines are logged only when they change, so a Monitor following the
+# log hears about each new state once rather than once a minute.
+last_note=""
+note() {
+    if [[ "$*" != "$last_note" ]]; then
+        log "$@"
+        last_note="$*"
+    fi
+}
+
+finish() {
+    log "$2"
+    echo "$1" >"$status_file"
+    exit "$1"
+}
+
+# Cancel the CI runs still going on a head the branch has moved past. A
+# repository whose workflows cancel superseded runs has done this already, and
+# a run that cannot be cancelled is left alone.
+cancel_runs() {
+    local ids id
+    ids="$(
+        gh run list --commit "$1" --json databaseId,status 2>/dev/null |
+            jq -r '.[] | select(.status != "completed") | .databaseId' 2>/dev/null
+    )" || return 0
+    for id in $ids; do
+        if gh run cancel "$id" >/dev/null 2>&1; then
+            log "cancelled run ${id} on ${1:0:7}"
+        fi
+    done
+}
+
+# Each check on the head as "pass", "pending" or "fail" with its name. The
+# rollup mixes check runs (status and conclusion) with commit statuses (state).
+# shellcheck disable=SC2016 # jq, not shell, expands these.
+checks_filter='
+    .statusCheckRollup // [] | .[]
+    | (.name // .context // "check") as $name
+    | if .context != null then
+          if .state == "SUCCESS" then "pass"
+          elif .state == "PENDING" or .state == "EXPECTED" then "pending"
+          else "fail" end
+      elif .status != "COMPLETED" then "pending"
+      elif .conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED" then "pass"
+      else "fail" end
+    | "\(.)\t\($name)"
+'
+
+# Give up on a state after this many polls of the same head: GitHub can take a
+# moment to report checks and recompute mergeability after a push.
+patience=5
+
+gh_failures=0
+update_failures=0
+merge_failures=0
+blocked_polls=0
+no_check_polls=0
+updated_from=""
+merge_requested=""
+seen_head=""
+
+log "landing with: gh pr merge ${merge_flags[*]}"
+
+while :; do
+    # stderr goes to a file so a warning cannot corrupt the JSON.
+    if ! pr_json="$(gh pr view "$n" --json state,isDraft,mergeStateStatus,headRefOid,statusCheckRollup 2>"$err_file")"; then
+        gh_failures=$((gh_failures + 1))
+        if ((gh_failures >= patience)); then
+            finish 1 "stop: gh pr view failed ${patience} times in a row: $(cat "$err_file")"
+        fi
+        sleep "$interval"
+        continue
+    fi
+    gh_failures=0
+
+    state="$(jq -r '.state' <<<"$pr_json")"
+    draft="$(jq -r '.isDraft' <<<"$pr_json")"
+    merge_state="$(jq -r '.mergeStateStatus' <<<"$pr_json")"
+    head="$(jq -r '.headRefOid' <<<"$pr_json")"
+    checks="$(jq -r "$checks_filter" <<<"$pr_json")"
+    short="${head:0:7}"
+
+    if [[ "$head" != "$seen_head" ]]; then
+        seen_head="$head"
+        blocked_polls=0
+        no_check_polls=0
+        merge_failures=0
+    fi
+
+    if [[ "$state" == MERGED ]]; then
+        finish 0 "merged ${short}"
+    fi
+    if [[ "$state" == CLOSED ]]; then
+        finish 1 "stop: the PR was closed without merging"
+    fi
+    if [[ -n "$merge_requested" ]]; then
+        finish 1 "stop: gh accepted the merge but the PR is still open (a merge queue or auto-merge?): ${merge_requested}"
+    fi
+    if [[ "$draft" == true ]]; then
+        finish 1 "stop: the PR is a draft; mark it ready, then run pr-land again"
+    fi
+    if [[ "$merge_state" == DIRTY ]]; then
+        finish 1 "stop: ${short} conflicts with the base branch; merge the base branch, resolve, push, then run pr-land again"
+    fi
+
+    failed="$(awk -F '\t' '$1 == "fail" { printf "%s%s", sep, $2; sep = ", " }' <<<"$checks")"
+    if [[ -n "$failed" ]]; then
+        finish 1 "stop: checks failed on ${short}: ${failed}"
+    fi
+
+    # BEHIND means the base moved and the repository requires branches to be
+    # up to date. Update at once, even with a run in progress: that run tests
+    # a head that could not be merged anyway.
+    if [[ "$merge_state" == BEHIND ]]; then
+        if [[ "$updated_from" == "$head" ]]; then
+            # GitHub has not caught up with the update yet.
+            note "waiting for the update of ${short} to land"
+        elif out="$(gh pr update-branch "$n" 2>&1)"; then
+            log "behind the base branch: updated ${short}"
+            updated_from="$head"
+            update_failures=0
+            cancel_runs "$head"
+        else
+            update_failures=$((update_failures + 1))
+            log "update of ${short} failed: ${out}"
+            if ((update_failures >= 3)); then
+                finish 1 "stop: could not update ${short} from the base branch: ${out}"
+            fi
+        fi
+        sleep "$interval"
+        continue
+    fi
+
+    if [[ -z "$checks" ]]; then
+        no_check_polls=$((no_check_polls + 1))
+        if ((no_check_polls >= patience)); then
+            finish 1 "stop: no checks reported on ${short}; merge it yourself if the repository has no CI"
+        fi
+        note "waiting for checks to start on ${short}"
+        sleep "$interval"
+        continue
+    fi
+
+    if grep -q '^pending' <<<"$checks"; then
+        note "waiting for checks on ${short}"
+        sleep "$interval"
+        continue
+    fi
+
+    # Every check on the head has passed.
+    case "$merge_state" in
+        CLEAN | HAS_HOOKS | UNSTABLE)
+            if out="$(gh pr merge "$n" "${merge_flags[@]}" --match-head-commit "$head" 2>&1)"; then
+                # The next poll should find the PR merged.
+                merge_requested="${out:-no output}"
+                continue
+            fi
+            merge_failures=$((merge_failures + 1))
+            log "merge of ${short} failed: ${out}"
+            if ((merge_failures >= 3)); then
+                finish 1 "stop: could not merge ${short}: ${out}"
+            fi
+            ;;
+        BLOCKED)
+            blocked_polls=$((blocked_polls + 1))
+            if ((blocked_polls >= patience)); then
+                finish 1 "stop: every check passed on ${short} but GitHub still blocks the merge (a required review or another rule?)"
+            fi
+            note "checks passed on ${short}; waiting for GitHub to allow the merge"
+            ;;
+        *)
+            note "checks passed on ${short}; waiting for GitHub to compute mergeability (${merge_state})"
+            ;;
+    esac
+    sleep "$interval"
+done

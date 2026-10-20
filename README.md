@@ -30,6 +30,25 @@ reproduce, the app would not run, or a criterion needs a person's judgment),
 the session marks the PR ready, says what it could and could not verify,
 gives steps for you to check the rest, and merges only once you approve.
 
+The session lands the PR with `plugins/herdr-issue/scripts/pr-land`, so
+sessions running side by side do not stall each other. Once only CI stands
+between the PR and its merge, the session runs it under a Monitor:
+
+```
+pr-land <PR> -- --squash
+```
+
+About once a minute it checks the PR. When the default branch has moved and
+the repository requires branches to be up to date, it updates the branch at
+once, without waiting for the CI run in progress, and cancels the runs on the
+old head. Once every check on the current head passes, it merges with the
+flags after `--`, which must name a merge method. It stops, with the reason on
+its last line, on failing checks, a merge conflict, a draft, or a block other
+than CI, and the session takes over. The lander runs apart from the command
+that started it and logs under `.git/herdr-issue/`; running the command again
+for the same PR follows the lander already running, so a Monitor can expire
+and be re-armed. It acts only while a session runs it.
+
 There are three modes, and the launch summary names the one used:
 
 - `superpowers`, the default when a `superpowers*` plugin is enabled in your
@@ -64,7 +83,8 @@ are the mode (`superpowers`, `plain` or `ultracode`) and, when several issues
 are launched, `multi`.
 
 `{{ISSUES}}` becomes the issue URLs as one phrase (`A`, `A and B`,
-`A, B and C`) and `{{DEFAULT_BRANCH}}` the remote default branch.
+`A, B and C`), `{{DEFAULT_BRANCH}}` the remote default branch, and
+`{{PR_LAND}}` the path of the plugin's `pr-land` script.
 `{{ISSUE_URL}}` names a single issue: a template refuses to launch several
 issues when `{{ISSUE_URL}}` would reach the prompt; keep it inside a
 `{{^multi}}` section.
@@ -75,8 +95,8 @@ issues when `{{ISSUE_URL}}` would reach the prompt; keep it inside a
 python -m pytest tests
 ```
 
-The tests drive the real launcher with stub `git`, `gh` and `herdr` on `PATH`;
-they need `jq` and `pytest`.
+The tests drive the real launcher and `pr-land` with stub `git`, `gh` and
+`herdr` on `PATH`; they need `git`, `jq` and `pytest`.
 
 ## License
 
