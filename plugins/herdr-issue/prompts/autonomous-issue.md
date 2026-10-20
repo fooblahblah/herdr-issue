@@ -245,18 +245,64 @@ Own the PR through completion:
 - rerun appropriate verification after changes;
 - never bypass required checks, reviews, branch protection, or merge queues;
 - mark the draft PR ready when appropriate;
-- merge using the repository's normal strategy once all requirements pass
-  and, for a customer-facing change, automated verification was conclusive or
-  I have approved it;
+- merge with pr-land (below) using the repository's normal strategy once all
+  requirements pass and, for a customer-facing change, automated verification
+  was conclusive or I have approved it;
 - verify the PR is merged and every referenced issue is closed.
+
+LANDING THE PR
+
+Other sessions merge into {{DEFAULT_BRANCH}} while you wait on CI, so land the
+PR with the plugin's lander instead of a polling loop of your own. Once
+nothing but CI stands between the PR and its merge (reviews and verification
+done, the PR marked ready, and any approval you need given), push, then run
+this under the Monitor tool with its timeout at the maximum:
+
+    "{{PR_LAND}}" <PR number> -- <gh pr merge flags>
+
+The merge flags name the repository's normal merge method, such as
+`--squash`, plus any subject or body flags its rules call for; a body file
+must stay in place until the merge. Run it from this worktree: it waits for
+GitHub to show your pushed HEAD, including when it reattaches. About once a
+minute it checks the PR. When {{DEFAULT_BRANCH}} has moved and the repository
+requires the branch to be up to date, it updates the branch at once, without
+waiting for the current CI run, and cancels the runs on the old head. When
+every check on the current head has passed, required or not, it merges. It
+may have merged {{DEFAULT_BRANCH}} into the remote branch, so pull before you
+push again.
+
+pr-land runs apart from the Monitor. When the Monitor expires, run the same
+command again to follow it. Stopping the Monitor does not stop the landing:
+to stop it, for example when I ask you to hold off, run
+`"{{PR_LAND}}" --stop <PR number>`.
+
+It exits 0 once the PR is merged. Otherwise its last line says why it
+stopped:
+- checks failed: when this change caused it, fix it and push. When a job
+  failed for reasons outside this change, such as a flaky test or a runner
+  problem, re-run the failed jobs and run pr-land again once they show as
+  queued or in progress. When a check that is not required keeps failing for
+  reasons outside this change, say so on the PR and merge it yourself with
+  `gh pr merge` and the same flags.
+- a merge conflict: merge {{DEFAULT_BRANCH}} locally, resolve it, push, and
+  run pr-land again.
+- the PR's head does not contain your HEAD: push, and run pr-land again.
+- blocked although every check passed: find the rule or review that blocks it
+  (`gh pr view`, the repository's rules) and deal with that.
+- gh accepted the merge but the PR is still open: the PR is in a merge queue;
+  follow the queue rather than running pr-land again.
+- no checks were reported: when the repository runs no CI for this change,
+  merge it yourself with `gh pr merge` and the same flags.
+- checks still pending after two hours: find the stuck check and deal with
+  it.
 
 If automated verification of a customer-facing change fails, fix the change
 and run it again; that is not a reason to stop. Stop before merging only when
 it is inconclusive: once checks pass, reviews are done, and the PR is marked
 ready, end your turn with what the automated verification covered and what it
 saw, what was inconclusive and why, the steps for me to check the rest by
-hand, and the PR link, and ask me to verify. When I approve, update from
-{{DEFAULT_BRANCH}} if needed, confirm checks still pass, and merge. If I report a problem,
+hand, and the PR link, and ask me to verify. When I approve, land the PR with
+pr-land. If I report a problem,
 fix it, run the automated verification again, update the steps, and ask
 again.
 

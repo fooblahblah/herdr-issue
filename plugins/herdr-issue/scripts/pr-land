@@ -1,0 +1,563 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    echo "usage: pr-land [<pr>] -- <gh pr merge flags>" >&2
+    echo "       pr-land --stop [<pr>]" >&2
+    echo "The merge flags must name a merge method: --merge, --squash or --rebase." >&2
+    exit 2
+}
+
+# pr-land lands one PR: it keeps the branch current with its base, merges once
+# every check on the current head passes, and stops with the reason when a
+# person or the session has to act. The work is done by a lander running
+# apart from this command, which only follows the lander's log. A Monitor
+# that runs this command can expire and be re-armed without stopping the
+# lander: running it again for the same PR reattaches. `pr-land --stop`
+# stops the lander, and so does an hour with nothing following it.
+#
+# Exit status: 0 once the PR is merged, 1 when the lander stopped without
+# merging (its last line says why), 2 for bad usage.
+
+# Seconds between polls of the PR, and before the poll that confirms a merge.
+# Tests shorten them.
+interval="${PR_LAND_INTERVAL:-60}"
+settle="${PR_LAND_SETTLE:-5}"
+# Seconds a head's checks may stay pending before the lander gives up.
+pending_limit="${PR_LAND_PENDING_LIMIT:-7200}"
+# Seconds the lander keeps going with nothing following it.
+orphan_limit="${PR_LAND_ORPHAN_LIMIT:-3600}"
+
+mode=follow
+case "${1:-}" in
+    --run)
+        mode=run
+        shift
+        ;;
+    --stop)
+        mode=stop
+        shift
+        ;;
+esac
+
+pr=""
+if [[ $# -gt 0 && "$1" != -- ]]; then
+    pr="$1"
+    shift
+fi
+
+if [[ "$mode" == stop ]]; then
+    [[ $# -eq 0 ]] || usage
+else
+    [[ "${1:-}" == -- ]] || usage
+    shift
+    # Checked before the array is expanded: bash 3.2 calls an empty one unbound.
+    [[ $# -gt 0 ]] || usage
+    merge_flags=("$@")
+
+    method=""
+    for flag in "${merge_flags[@]}"; do
+        case "$flag" in
+            -m | --merge | -s | --squash | -r | --rebase)
+                method=1
+                ;;
+            # The session deletes its own branch after the merge: gh's -d would
+            # also switch this worktree to the default branch, which another
+            # worktree usually has checked out. --auto and --admin hand the
+            # merge to GitHub or bypass its rules; pr-land does neither.
+            --admin | --auto | --disable-auto | -d | --delete-branch | --match-head-commit*)
+                echo "pr-land: ${flag} is not allowed; pr-land merges the PR itself." >&2
+                exit 2
+                ;;
+        esac
+    done
+    [[ -n "$method" ]] || usage
+fi
+
+self="$(realpath "${BASH_SOURCE[0]}")"
+
+if [[ "$mode" == run ]]; then
+    n="$pr"
+else
+    # gh resolves a number, URL or branch, or the current branch's PR.
+    pr_json="$(gh pr view ${pr:+"$pr"} --json number,headRefName)"
+    n="$(jq -r '.number' <<<"$pr_json")"
+    pr_branch="$(jq -r '.headRefName' <<<"$pr_json")"
+fi
+
+state_dir="$(git rev-parse --path-format=absolute --git-common-dir)/herdr-issue"
+log_file="${state_dir}/pr-land-${n}.log"
+pid_file="${state_dir}/pr-land-${n}.pid"
+status_file="${state_dir}/pr-land-${n}.status"
+err_file="${state_dir}/pr-land-${n}.err"
+beat_file="${state_dir}/pr-land-${n}.beat"
+lock_dir="${state_dir}/pr-land-${n}.lock"
+head_file="${state_dir}/pr-land-${n}.head"
+
+stamp() {
+    printf '%s #%s %s\n' "$(date +%H:%M:%S)" "$n" "$*"
+}
+
+# Followers read the status the moment the file appears, so it appears whole.
+write_status() {
+    echo "$1" >"${status_file}.tmp" && mv "${status_file}.tmp" "$status_file"
+}
+
+# The running lander's pid. A pid file can outlive its lander and the pid be
+# reused, so the process must also be this PR's lander.
+lander_pid() {
+    local pid
+    pid="$(cat "$pid_file" 2>/dev/null)" || return 1
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || return 1
+    # -ww: ps otherwise cuts args to an exported COLUMNS, losing the match.
+    [[ "$(ps -ww -o args= -p "$pid" 2>/dev/null)" == *"pr-land --run ${n} "* ]] || return 1
+    echo "$pid"
+}
+
+if [[ "$mode" == stop ]]; then
+    if pid="$(lander_pid)"; then
+        # The lander leads its own process group; its gh calls go with it.
+        kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        rm -f "$pid_file"
+        # The lander may have merged the PR just before it was stopped.
+        if [[ "$(jq -r '.state' <<<"$(gh pr view "$n" --json state 2>/dev/null)" 2>/dev/null)" == MERGED ]]; then
+            stamp "merged before pr-land --stop stopped the lander" >>"$log_file"
+            write_status 0
+            echo "pr-land: the lander for #${n} had already merged it."
+        else
+            stamp "stop: stopped by pr-land --stop" >>"$log_file"
+            write_status 1
+            echo "pr-land: stopped the lander for #${n}."
+        fi
+    else
+        echo "pr-land: no lander is running for #${n}."
+    fi
+    exit 0
+fi
+
+if [[ "$mode" == follow ]]; then
+    mkdir -p "$state_dir"
+
+    # Checking for a lander and starting one is a single step, so two
+    # followers starting at once cannot start two landers. A lock still held
+    # after a minute was left by a follower that died holding it.
+    locked=""
+    for _ in $(seq 1 120); do
+        if mkdir "$lock_dir" 2>/dev/null; then
+            locked=1
+            break
+        fi
+        sleep 0.5
+    done
+    if [[ -z "$locked" ]]; then
+        rm -rf "$lock_dir"
+        mkdir "$lock_dir" 2>/dev/null || true
+    fi
+    trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+
+    beat() {
+        date +%s >"${beat_file}.tmp" && mv "${beat_file}.tmp" "$beat_file"
+    }
+
+    # On the PR's branch, hand the lander the local HEAD: it waits until
+    # GitHub's head is that commit or descends from it, so it never merges a
+    # head older than what the session just pushed. A running lander picks up
+    # a new HEAD when the session reattaches.
+    note_head() {
+        local head
+        if [[ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" == "$pr_branch" ]] &&
+            head="$(git rev-parse --verify --quiet HEAD)"; then
+            echo "$head" >"${head_file}.tmp" && mv "${head_file}.tmp" "$head_file"
+        fi
+    }
+
+    if pid="$(lander_pid)"; then
+        note_head
+        beat
+        echo "pr-land: following the lander already running for #${n} (pid ${pid});" \
+            "it keeps the merge flags it was started with."
+        # Its latest line, so a reattached Monitor knows where things stand.
+        tail -n 1 "$log_file"
+        offset="$(wc -c <"$log_file")"
+    else
+        : >"$log_file"
+        rm -f "$status_file" "$err_file" "$head_file"
+        beat
+        note_head
+        # The lander gets its own process group (set -m) and is orphaned when
+        # the subshell exits, so a Monitor that kills this command and its
+        # children leaves it running.
+        (
+            set -m
+            nohup "$self" --run "$n" -- "${merge_flags[@]}" \
+                </dev/null >>"$log_file" 2>&1 &
+            echo "$!" >"$pid_file"
+        )
+        pid="$(cat "$pid_file")"
+        offset=0
+        # Hold the lock until the lander has logged its first line, by which
+        # time ps shows it as a lander, so a follower arriving now finds it
+        # rather than starting another.
+        for _ in $(seq 1 600); do
+            [[ ! -s "$log_file" ]] || break
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.05
+        done
+    fi
+    rmdir "$lock_dir" 2>/dev/null || true
+    # The lock is released; exiting later must not remove another's.
+    trap - EXIT
+
+    # Copy the log to stdout as it grows, until the lander finishes. Its status
+    # file is written after its last line, so the log is complete by then.
+    while :; do
+        beat
+        size="$(wc -c <"$log_file")"
+        if ((size > offset)); then
+            tail -c +$((offset + 1)) "$log_file" | head -c $((size - offset))
+            offset="$size"
+        fi
+        [[ ! -f "$status_file" ]] || break
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+    done
+    tail -c +$((offset + 1)) "$log_file"
+
+    # pr-land --stop writes the status just after the lander dies.
+    for _ in $(seq 1 50); do
+        [[ ! -f "$status_file" ]] || break
+        sleep 0.1
+    done
+    if [[ ! -f "$status_file" ]]; then
+        echo "pr-land: the lander for #${n} stopped without a result; run pr-land again."
+        exit 1
+    fi
+    exit "$(cat "$status_file")"
+fi
+
+# --- The lander -------------------------------------------------------------
+
+trap '[[ "$(cat "$pid_file" 2>/dev/null)" != "$$" ]] || rm -f "$pid_file"' EXIT
+
+log() {
+    stamp "$@"
+}
+
+# Waiting lines are logged only when they change, so a Monitor following the
+# log hears about each new state once rather than once a minute.
+last_note=""
+note() {
+    if [[ "$*" != "$last_note" ]]; then
+        log "$@"
+        last_note="$*"
+    fi
+}
+
+finish() {
+    log "$2"
+    write_status "$1"
+    exit "$1"
+}
+
+# gh's errors run over several lines, and a refused merge ends by suggesting
+# --admin, which pr-land never uses. Keep a reason to one line without it.
+oneline() {
+    { grep -v -e '--admin' || true; } | tr '\n' ' ' | sed -e 's/  */ /g' -e 's/ $//'
+}
+
+# Whether the base branch requires branches to be up to date before merging,
+# through branch protection or a ruleset. Without that rule a branch behind
+# its base merges as it is, so it is never updated.
+requires_up_to_date() {
+    gh api "repos/{owner}/{repo}/branches/$1/protection/required_status_checks" 2>/dev/null |
+        jq -e '.strict == true' >/dev/null 2>&1 && return 0
+    gh api "repos/{owner}/{repo}/rules/branches/$1" 2>/dev/null |
+        jq -e 'any(.[]; .type == "required_status_checks"
+            and .parameters.strict_required_status_checks_policy == true)' >/dev/null 2>&1
+}
+
+# compare <base> <head>: GitHub's comparison, or nothing when it fails.
+compare() {
+    gh api "repos/{owner}/{repo}/compare/$1...$2" 2>/dev/null || true
+}
+
+# Cancel the CI runs still going on a head the branch has moved past, on the
+# PR's own branch only, so a deploy or other workflow on that commit is left
+# alone. A repository whose workflows cancel superseded runs has done this
+# already, and a run that cannot be cancelled is left alone.
+cancel_runs() {
+    local ids id
+    ids="$(
+        gh run list --commit "$1" --branch "$2" --json databaseId,status 2>/dev/null |
+            jq -r '.[] | select(.status != "completed") | .databaseId' 2>/dev/null
+    )" || return 0
+    for id in $ids; do
+        if gh run cancel "$id" >/dev/null 2>&1; then
+            log "cancelled run ${id} on ${1:0:7}"
+        fi
+    done
+}
+
+# Each check on the head as "pass", "pending" or "fail" with its name. The
+# rollup mixes check runs (status and conclusion) with commit statuses (state)
+# and keeps every attempt of a re-run check, so only the latest attempt of
+# each counts, an unfinished one first.
+# shellcheck disable=SC2016 # jq, not shell, expands these.
+checks_filter='
+    [.statusCheckRollup // [] | .[]
+     | {key: (if .context != null then "status:\(.context)"
+              else "check:\(.workflowName // ""):\(.name // "")" end),
+        order: [(.context == null and .status != "COMPLETED"), (.startedAt // .createdAt // "")],
+        check: .}]
+    | group_by(.key) | map(max_by(.order).check) | .[]
+    | (.name // .context // "check") as $name
+    | if .context != null then
+          if .state == "SUCCESS" then "pass"
+          elif .state == "PENDING" or .state == "EXPECTED" then "pending"
+          else "fail" end
+      elif .status != "COMPLETED" then "pending"
+      elif .conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED" then "pass"
+      else "fail" end
+    | "\(.)\t\($name)"
+'
+
+names_of() {
+    awk -F '\t' -v want="$1" '$1 == want { printf "%s%s", sep, $2; sep = ", " }'
+}
+
+# Give up on a state after this many polls of the same head: GitHub can take a
+# moment to report checks and recompute mergeability after a push.
+patience=5
+
+expected_head=""
+taken_head=""
+strict=""
+strict_age=10
+fail_polls=0
+gh_failures=0
+update_failures=0
+merge_failures=0
+blocked_polls=0
+no_check_polls=0
+behind_polls=0
+expected_polls=0
+open_polls=0
+updated_from=""
+cancel_from=""
+merge_requested=""
+seen_head=""
+head_since=0
+
+log "landing with: gh pr merge ${merge_flags[*]}"
+
+while :; do
+    now="$(date +%s)"
+    beat_at="$(cat "$beat_file" 2>/dev/null || true)"
+    if ((now - ${beat_at:-$now} > orphan_limit)); then
+        finish 1 "stop: nothing has followed this lander for $((orphan_limit / 60)) minutes; run pr-land again to resume"
+    fi
+
+    # stderr goes to a file so a warning cannot corrupt the JSON.
+    if ! pr_json="$(gh pr view "$n" --json state,isDraft,mergeStateStatus,headRefOid,headRefName,baseRefName,statusCheckRollup 2>"$err_file")"; then
+        gh_failures=$((gh_failures + 1))
+        if ((gh_failures >= patience)); then
+            finish 1 "stop: gh pr view failed ${patience} times in a row: $(oneline <"$err_file")"
+        fi
+        sleep "$interval"
+        continue
+    fi
+    gh_failures=0
+
+    wanted="$(cat "$head_file" 2>/dev/null || true)"
+    if [[ -n "$wanted" && "$wanted" != "$taken_head" ]]; then
+        taken_head="$wanted"
+        expected_head="$wanted"
+        expected_polls=0
+    fi
+
+    state="$(jq -r '.state' <<<"$pr_json")"
+    draft="$(jq -r '.isDraft' <<<"$pr_json")"
+    merge_state="$(jq -r '.mergeStateStatus' <<<"$pr_json")"
+    head="$(jq -r '.headRefOid' <<<"$pr_json")"
+    head_branch="$(jq -r '.headRefName' <<<"$pr_json")"
+    base="$(jq -r '.baseRefName' <<<"$pr_json")"
+    checks="$(jq -r "$checks_filter" <<<"$pr_json")"
+    short="${head:0:7}"
+
+    if [[ "$head" != "$seen_head" ]]; then
+        # Only once the branch has really moved past the head it was updated
+        # from are that head's runs stale.
+        if [[ -n "$cancel_from" && "$head" != "$cancel_from" ]]; then
+            cancel_runs "$cancel_from" "$head_branch"
+            cancel_from=""
+        fi
+        seen_head="$head"
+        head_since="$now"
+        blocked_polls=0
+        no_check_polls=0
+        behind_polls=0
+        merge_failures=0
+        fail_polls=0
+    fi
+
+    if [[ "$state" == MERGED ]]; then
+        finish 0 "merged ${short}"
+    fi
+    if [[ "$state" == CLOSED ]]; then
+        finish 1 "stop: the PR was closed without merging"
+    fi
+    if [[ -n "$merge_requested" ]]; then
+        open_polls=$((open_polls + 1))
+        if ((open_polls >= 3)); then
+            finish 1 "stop: gh accepted the merge but the PR is still open (a merge queue?): ${merge_requested}"
+        fi
+        sleep "$settle"
+        continue
+    fi
+    if [[ "$draft" == true ]]; then
+        finish 1 "stop: the PR is a draft; mark it ready, then run pr-land again"
+    fi
+
+    # Wait until GitHub's head is the session's HEAD or descends from it (an
+    # update from the base), so a push GitHub has not seen yet is not raced.
+    if [[ -n "$expected_head" ]]; then
+        if [[ "$head" == "$expected_head" ]] ||
+            jq -e '.status == "ahead" or .status == "identical"' \
+                <<<"$(compare "$expected_head" "$head")" >/dev/null 2>&1; then
+            expected_head=""
+        else
+            expected_polls=$((expected_polls + 1))
+            if ((expected_polls >= patience)); then
+                finish 1 "stop: the PR's head ${short} does not contain your HEAD ${expected_head:0:7}; push, then run pr-land again"
+            fi
+            note "waiting for GitHub to see ${expected_head:0:7}"
+            sleep "$interval"
+            continue
+        fi
+    fi
+
+    if [[ "$merge_state" == DIRTY ]]; then
+        finish 1 "stop: ${short} conflicts with the base branch; merge the base branch, resolve, push, then run pr-land again"
+    fi
+
+    # A failure is confirmed on a second poll: a job re-run just before
+    # pr-land started may not show in the rollup yet.
+    failed="$(names_of fail <<<"$checks")"
+    if [[ -n "$failed" ]]; then
+        fail_polls=$((fail_polls + 1))
+        if ((fail_polls >= 2)); then
+            finish 1 "stop: checks failed on ${short}: ${failed}"
+        fi
+        note "checks failed on ${short}: ${failed}; checking again before stopping"
+        sleep "$interval"
+        continue
+    fi
+    fail_polls=0
+
+    # Behind a base that requires branches to be up to date: update at once,
+    # even with a run in progress, since that run tests a head that could not
+    # be merged anyway. GitHub reports BEHIND for this, but not reliably while
+    # required checks are pending, so ask how far behind the head is as well.
+    behind=""
+    if [[ "$merge_state" == BEHIND ]]; then
+        behind=1
+    else
+        # A rule found stays found; its absence is checked again now and then,
+        # since a failed lookup reads the same as no rule.
+        if [[ -z "$strict" ]]; then
+            strict_age=$((strict_age + 1))
+            if ((strict_age >= 10)); then
+                strict_age=0
+                if requires_up_to_date "$base"; then
+                    strict=1
+                fi
+            fi
+        fi
+        if [[ -n "$strict" ]] &&
+            jq -e '.behind_by > 0' <<<"$(compare "$base" "$head")" >/dev/null 2>&1; then
+            behind=1
+        fi
+    fi
+
+    if [[ -n "$behind" ]]; then
+        if [[ "$updated_from" == "$head" ]]; then
+            behind_polls=$((behind_polls + 1))
+            if ((behind_polls >= patience)); then
+                finish 1 "stop: ${short} still reads as behind the base branch after it was updated"
+            fi
+            note "waiting for the update of ${short} to land"
+        elif out="$(gh pr update-branch "$n" 2>&1)"; then
+            if [[ "$out" == *"up-to-date"* || "$out" == *"up to date"* ]]; then
+                # GitHub's merge state lags; nothing was pushed.
+                behind_polls=$((behind_polls + 1))
+                if ((behind_polls >= patience)); then
+                    finish 1 "stop: GitHub keeps reporting ${short} behind, but it is up to date with the base branch"
+                fi
+                note "GitHub reports ${short} behind, but it is up to date; waiting"
+            else
+                log "behind the base branch: updated ${short}"
+                updated_from="$head"
+                cancel_from="$head"
+                update_failures=0
+            fi
+        else
+            update_failures=$((update_failures + 1))
+            out="$(oneline <<<"$out")"
+            log "update of ${short} failed: ${out}"
+            if ((update_failures >= 3)); then
+                finish 1 "stop: could not update ${short} from the base branch: ${out}"
+            fi
+        fi
+        sleep "$interval"
+        continue
+    fi
+
+    if [[ -z "$checks" ]]; then
+        no_check_polls=$((no_check_polls + 1))
+        if ((no_check_polls >= 2 * patience)); then
+            finish 1 "stop: no checks were reported on ${short} after ${no_check_polls} polls"
+        fi
+        note "waiting for checks to start on ${short}"
+        sleep "$interval"
+        continue
+    fi
+
+    pending="$(names_of pending <<<"$checks")"
+    if [[ -n "$pending" ]]; then
+        if ((now - head_since > pending_limit)); then
+            finish 1 "stop: checks still pending on ${short} after $(((now - head_since) / 60)) minutes: ${pending}"
+        fi
+        note "waiting for checks on ${short}"
+        sleep "$interval"
+        continue
+    fi
+
+    # Every check on the head has passed.
+    case "$merge_state" in
+        CLEAN | HAS_HOOKS | UNSTABLE)
+            if out="$(gh pr merge "$n" "${merge_flags[@]}" --match-head-commit "$head" 2>&1)"; then
+                # The next polls should find the PR merged.
+                merge_requested="$(oneline <<<"${out:-no output}")"
+                sleep "$settle"
+                continue
+            fi
+            merge_failures=$((merge_failures + 1))
+            out="$(oneline <<<"$out")"
+            log "merge of ${short} failed: ${out}"
+            if ((merge_failures >= 3)); then
+                finish 1 "stop: could not merge ${short}: ${out}"
+            fi
+            ;;
+        BLOCKED)
+            blocked_polls=$((blocked_polls + 1))
+            if ((blocked_polls >= patience)); then
+                finish 1 "stop: every check passed on ${short} but GitHub still blocks the merge (a required review or another rule?)"
+            fi
+            note "checks passed on ${short}; waiting for GitHub to allow the merge"
+            ;;
+        *)
+            note "checks passed on ${short}; waiting for GitHub to compute mergeability (${merge_state})"
+            ;;
+    esac
+    sleep "$interval"
+done

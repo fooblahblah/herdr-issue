@@ -256,6 +256,13 @@ def test_issue_branches_from_the_remote_default_branch(harness, origin_head, bas
 SUPERPOWERS = "superpowers@superpowers-marketplace"
 
 
+def test_plugin_prompt_names_the_pr_land_script(harness):
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    pr_land = PLUGIN_ROOT / "scripts" / "pr-land"
+    assert f'"{pr_land}" <PR number> -- <gh pr merge flags>' in prompt_sent(calls)
+
+
 def test_without_superpowers_the_default_mode_is_plain(harness):
     proc, calls = harness.run("101", issues={"101": OPEN})
     assert proc.returncode == 0, proc.stdout + proc.stderr

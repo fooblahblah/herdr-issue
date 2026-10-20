@@ -30,6 +30,33 @@ reproduce, the app would not run, or a criterion needs a person's judgment),
 the session marks the PR ready, says what it could and could not verify,
 gives steps for you to check the rest, and merges only once you approve.
 
+The session lands the PR with `plugins/herdr-issue/scripts/pr-land`, so
+sessions running side by side do not stall each other. Once only CI stands
+between the PR and its merge, the session runs it under a Monitor:
+
+```
+pr-land <PR> -- --squash
+```
+
+Run from the PR's branch, it first waits for GitHub to show the local HEAD.
+It then checks the PR about once a minute. When the default branch has moved
+and the repository requires branches to be up to date (through branch
+protection, which only an admin can read, or a ruleset), it
+updates the branch at once, without waiting for the CI run in progress, and
+cancels the PR branch's runs on the old head. The update is always a merge
+commit, never a rebase. Once every check on the current head passes, required
+or not, counting only the latest attempt of a re-run check, it merges with the
+flags after `--`, which must name a merge method. It stops, with the reason on
+its last line, on checks that fail on two polls in a row, a merge conflict, a
+draft, checks pending for two hours, or a block other than CI, and the
+session takes over.
+
+The lander runs apart from the command that started it and logs under
+`.git/herdr-issue/`. Running the command again for the same PR follows the
+lander already running, so a Monitor can expire and be re-armed.
+`pr-land --stop <PR>` stops it, and it stops itself after an hour with
+nothing following it.
+
 There are three modes, and the launch summary names the one used:
 
 - `superpowers`, the default when a `superpowers*` plugin is enabled in your
@@ -64,7 +91,8 @@ are the mode (`superpowers`, `plain` or `ultracode`) and, when several issues
 are launched, `multi`.
 
 `{{ISSUES}}` becomes the issue URLs as one phrase (`A`, `A and B`,
-`A, B and C`) and `{{DEFAULT_BRANCH}}` the remote default branch.
+`A, B and C`), `{{DEFAULT_BRANCH}}` the remote default branch, and
+`{{PR_LAND}}` the path of the plugin's `pr-land` script.
 `{{ISSUE_URL}}` names a single issue: a template refuses to launch several
 issues when `{{ISSUE_URL}}` would reach the prompt; keep it inside a
 `{{^multi}}` section.
@@ -75,8 +103,8 @@ issues when `{{ISSUE_URL}}` would reach the prompt; keep it inside a
 python -m pytest tests
 ```
 
-The tests drive the real launcher with stub `git`, `gh` and `herdr` on `PATH`;
-they need `jq` and `pytest`.
+The tests drive the real launcher and `pr-land` with stub `git`, `gh` and
+`herdr` on `PATH`; they need `git`, `jq` and `pytest`.
 
 ## License
 

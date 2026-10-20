@@ -217,7 +217,7 @@ done
 # value is ever read as a pattern or an escape.
 prompt="$(
     MODE="$mode" MULTI="$multi" ISSUES="$issues_text" ISSUE_URL="${urls[0]}" \
-        DEFAULT_BRANCH="$base" awk '
+        DEFAULT_BRANCH="$base" PR_LAND="${plugin_root}/scripts/pr-land" awk '
         function fail(msg) {
             printf "%s line %d: %s\n", FILENAME, FNR, msg > "/dev/stderr"
             bad = 1
@@ -259,6 +259,7 @@ prompt="$(
                 fail("{{ISSUE_URL}} names a single issue; use {{ISSUES}} to launch several")
             line = replace($0, "{{ISSUES}}", ENVIRON["ISSUES"])
             line = replace(line, "{{ISSUE_URL}}", ENVIRON["ISSUE_URL"])
+            line = replace(line, "{{PR_LAND}}", ENVIRON["PR_LAND"])
             print replace(line, "{{DEFAULT_BRANCH}}", ENVIRON["DEFAULT_BRANCH"])
         }
         END {
