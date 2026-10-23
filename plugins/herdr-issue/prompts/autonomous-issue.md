@@ -58,8 +58,8 @@ sending the requests for an API. Run the before-the-fix steps while
 understanding the issue, before changing any code, and the after-the-fix
 steps once the change is reviewed:
 - Where the repository has end-to-end browser tests (Playwright, Cypress, or
-  similar), write the reproduction as one of them, see it fail before the
-  fix, and keep it as the regression test.
+  similar), write the reproduction as one of them and see it fail before the
+  fix. Whether it stays in the suite is decided under TESTS TO KEEP.
 - Otherwise, start the app and drive it with headless Playwright (through
   `npx`, using an installed Chromium or Chrome where there is one) from a
   script in your scratchpad directory, not committed. Read the screenshots
@@ -92,8 +92,28 @@ routes, commands, inputs, and expected results. Put the before-the-fix steps
 in the draft PR as soon as you have reproduced the issue, so it can be checked
 while the fix is in progress.
 
-For a backend change, the regression test is the reproduction: name it in the
-PR description and say that it fails on `{{DEFAULT_BRANCH}}`.
+For a backend change, reproduce the problem with a test or a script and see it
+fail on `{{DEFAULT_BRANCH}}` before changing any code. Name it in the PR
+description. Whether it stays in the suite is decided under TESTS TO KEEP.
+
+TESTS TO KEEP
+
+A reproduction proves the fix. It is not automatically a permanent test: every
+test you keep runs on every future PR. Before marking the PR ready, decide for
+each test this PR adds, including any a reviewer asked for:
+- Keep it in the main suite only when it guards a lasting property of the
+  product, something a later change could plausibly break, and it is cheap.
+  Name it for that property, not for the issue number, and extend an existing
+  test of the same property before adding a new file.
+- When the property is worth guarding but the test is expensive, such as an
+  end-to-end run or an exhaustive sweep over bytes, orders, or combinations,
+  keep a small representative case in the main suite and put the full sweep
+  in the repository's less frequent tier.
+- Otherwise do not commit it. Keep the reproduction in your scratchpad
+  directory, and record in the Verification section what it was, that it
+  failed before the fix, and that it passed after.
+Where the repository documents its own test tiers, markers, or time budget,
+follow them. Give each decision one line in the PR description.
 
 MODEL / SUBAGENT ROUTING
 
@@ -191,8 +211,9 @@ Work in this order, keeping each step proportionate to the issue:
    substantial hidden complexity, write a short plan first (the approach, the
    alternatives you rejected, the tasks in order) and put it in the PR
    description.
-3. Implement, task by task. Where the change is testable, write the
-   regression test first and see it fail for the right reason.
+3. Implement, task by task. Where the change is testable, write the failing
+   test or reproduction first and see it fail for the right reason; keep it
+   only as TESTS TO KEEP allows.
 4. Review. Have each task's diff reviewed by a fresh subagent that did not
    write it, against the issue's requirements and for defects. Fix what it
    finds and have the fixes re-reviewed until a round finds nothing new.
@@ -211,7 +232,7 @@ as the active tracking artifact. Create it with `--assignee @me`.
 Ensure the PR closes every referenced issue.
 
 Continue autonomously through:
-- implementation and appropriate regression tests;
+- implementation, with the tests TESTS TO KEEP allows;
 {{#superpowers}}
 - Superpowers task review and fix/re-review cycles;
 {{/superpowers}}

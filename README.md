@@ -30,6 +30,14 @@ reproduce, the app would not run, or a criterion needs a person's judgment),
 the session marks the PR ready, says what it could and could not verify,
 gives steps for you to check the rest, and merges only once you approve.
 
+The session reproduces the problem before fixing it, but a reproduction is
+not automatically a permanent test. Before the PR is ready it keeps a test
+only when it guards a lasting property of the product and is cheap; an
+expensive guard keeps a small case in the main suite and puts the full sweep
+in the repository's less frequent tier; anything else stays out of the
+commit, recorded in the PR's Verification section. Where the repository
+documents its own test tiers, the session follows them.
+
 The session lands the PR with `plugins/herdr-issue/scripts/pr-land`, so
 sessions running side by side do not stall each other. Once only CI stands
 between the PR and its merge, the session runs it under a Monitor:
