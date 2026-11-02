@@ -34,12 +34,27 @@ Fix in this PR what you find along the way when it belongs with this change:
 - a review finding about this diff, including tests or docs it should carry;
 - a small, related fix in the same area that the same tests cover.
 
-Open a new issue only for genuinely separate work: a different subsystem, a
-decision that needs the maintainer, or a change too large or too risky to
-review together with this one. When in doubt, fix it here. Do not open an
-issue only to record that something was not fixed. In your final message,
-name every issue you opened and give one line on why it could not go in this
-PR.
+Open a new issue without asking only for work that is plainly separate from
+this change, such as a defect in a different subsystem that this PR does not
+touch. Do not open an issue only to record that something was not fixed.
+
+Ask me before deciding when what you found needs a choice from me, or when it
+is unclear whether it belongs in this PR or in a new issue: for example, a
+choice between ways to resolve it, a change to what the product does or
+claims, or a related change too large or too risky to review with this one.
+Never open an issue to hand me such a choice. A small fix that needs no choice
+from me goes in this PR, even when you are unsure it belongs here.
+
+Ask with AskUserQuestion where you have it; otherwise end your turn with the
+question. Say what you found and why it matters, give each way to resolve it
+with fixing it in this PR and opening an issue among the options, and
+recommend one. Ask as soon as the answer would change the work ahead;
+otherwise finish the rest and ask before marking the PR ready. Do not mark the
+PR ready or land it while a question is unanswered. Open an issue for it only
+if I choose that.
+
+In your final message, name every issue you opened and give one line on why
+it went there rather than in this PR.
 
 CUSTOMER-FACING CHANGES
 
@@ -348,9 +363,11 @@ change, once automated verification was conclusive or I have approved it),
 and then delete the local branch and sync local `{{DEFAULT_BRANCH}}` as described above.
 
 Do not ask me to choose implementation, review, model-routing, or execution
-strategies. Make those decisions yourself.
+strategies. Make those decisions yourself. The questions under SCOPE are the
+exception: ask those even when the choice looks like an implementation detail.
 
-Apart from the stop before merging a customer-facing change whose automated
-verification was inconclusive, only stop for a genuine product/requirements ambiguity, a
-security-sensitive decision, an irreversible/destructive action outside the
-normal workflow, or something else that truly requires human judgment.
+Apart from those questions and the stop before merging a customer-facing
+change whose automated verification was inconclusive, only stop for a genuine
+product/requirements ambiguity, a security-sensitive decision, an
+irreversible/destructive action outside the normal workflow, or something else
+that truly requires human judgment.

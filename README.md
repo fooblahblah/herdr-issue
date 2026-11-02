@@ -21,9 +21,14 @@ numbers as fit Herdr's 32-character limit. The session is given the prompt in
 to you. If any issue already has a worktree, alone or with others, or is not
 open, nothing is launched and every problem is reported.
 
-The session takes the PR through to merge on its own. A customer-facing
-change (UI, public API, CLI output, or anything else a customer could check
-by hand) is first verified the way a customer would use it: in a headless
+The session takes the PR through to merge on its own, with one exception
+for scope. It fixes what belongs with the change and opens an issue unasked
+only for plainly separate work. When something it finds needs your choice, or
+could go either way between the PR and a new issue, it asks you, and it does
+not mark the PR ready or land it until you answer.
+
+A customer-facing change (UI, public API, CLI output, or anything else a
+customer could check by hand) is first verified the way a customer would use it: in a headless
 browser through Playwright for UI, before and after the fix. When that is
 conclusive, the session merges. When it is not (the problem would not
 reproduce, the app would not run, or a criterion needs a person's judgment),
