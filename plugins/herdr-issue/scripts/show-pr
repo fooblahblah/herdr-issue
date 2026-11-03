@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# show-pr names a session's PR in Herdr's sidebar, on the line under the
+# workspace title, as "Issue: #3284 · PR #3301" ("Issues: #3284, #3285 · ..."
+# for several). It reads the issue numbers from the branch, which keeps every
+# number even where the agent name drops some to fit Herdr. Only the displayed
+# name changes: the agent keeps its real name, so the launcher still finds the
+# session by it.
+#
+#   show-pr [<pr>]   label the calling Herdr pane; without a number, use the
+#                    current branch's PR
+#   show-pr --hook   the plugin's PostToolUse hook: after a `gh pr` command on
+#                    an issue/ branch in a Herdr pane, label the pane with the
+#                    branch's PR. It does it again after every `gh pr` command,
+#                    which restores the label after a Herdr restart. It never
+#                    prints, and it always exits 0.
+
+usage() {
+    echo "usage: show-pr [<pr>]" >&2
+    echo "       show-pr --hook   (PostToolUse input on stdin)" >&2
+    exit 2
+}
+
+# The "Issue: ..." part of the label for the branch checked out in $1, or
+# nothing when the branch names no issues.
+issues_label() {
+    local branch issues list
+    branch="$(git -C "$1" branch --show-current 2>/dev/null || true)"
+    [[ "$branch" =~ ^issue/([0-9]+(_[0-9]+)*)- ]] || return 0
+    IFS=_ read -ra issues <<<"${BASH_REMATCH[1]}"
+    if [[ ${#issues[@]} -gt 1 ]]; then
+        list="$(printf ', #%s' "${issues[@]}")"
+        echo "Issues: ${list:2}"
+    else
+        echo "Issue: #${issues[0]}"
+    fi
+}
+
+# The number of the PR whose head is the branch checked out in $1.
+branch_pr() {
+    (cd "$1" && gh pr view --json number --jq .number)
+}
+
+# Label the calling pane with PR $2, for the work tree in $1.
+show() {
+    local issues
+    issues="$(issues_label "$1")"
+    herdr pane report-metadata "$HERDR_PANE_ID" \
+        --source herdr-issue \
+        --display-agent "${issues:+${issues} · }PR #$2"
+}
+
+hook() {
+    local input command dir pr
+    [[ -n "${HERDR_PANE_ID:-}" ]] || return 0
+    input="$(cat)"
+    command="$(jq -r '.tool_input.command // empty' <<<"$input")"
+    dir="$(jq -r '.cwd // empty' <<<"$input")"
+    [[ -n "$dir" ]] || dir="$PWD"
+    # gh as a word of its own: not ghx, my-gh or path/gh-wrapper.
+    [[ "$command" =~ (^|[^[:alnum:]_./-])gh[[:space:]]+pr([[:space:]]|$) ]] || return 0
+    # Only herdr-issue sessions; the plugin's hook runs in every session.
+    [[ -n "$(issues_label "$dir")" ]] || return 0
+    pr="$(branch_pr "$dir")"
+    [[ "$pr" =~ ^[0-9]+$ ]] || return 0
+    show "$dir" "$pr"
+}
+
+if [[ "${1:-}" == --hook && $# -eq 1 ]]; then
+    hook >/dev/null 2>&1 || true
+    exit 0
+fi
+
+[[ $# -le 1 ]] || usage
+if [[ $# -eq 1 ]]; then
+    pr="${1#\#}"
+    [[ "$pr" =~ ^[0-9]+$ ]] || usage
+fi
+
+if [[ -z "${HERDR_PANE_ID:-}" ]]; then
+    echo "show-pr: HERDR_PANE_ID is not set; run it from the session's Herdr pane." >&2
+    exit 1
+fi
+
+if [[ $# -eq 0 ]]; then
+    pr="$(branch_pr "$PWD")"
+fi
+
+show "$PWD" "$pr"
