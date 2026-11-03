@@ -153,6 +153,28 @@ def test_single_issue_keeps_the_existing_output(harness):
     assert "Launched:" not in proc.stdout
 
 
+def sidebar_labels(calls: list) -> list[list[str]]:
+    return [c[3:] for c in calls if c[:3] == ["herdr", "pane", "report-metadata"]]
+
+
+@pytest.mark.parametrize(
+    ("args", "label"),
+    [
+        (("101",), "Issue: #101"),
+        (("101", "102", "103"), "Issues: #101, #102, #103"),
+    ],
+)
+def test_the_sidebar_names_the_issues_from_launch(harness, args, label):
+    proc, calls = harness.run(*args, issues={n: OPEN for n in args})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert sidebar_labels(calls) == [
+        ["p1", "--source", "herdr-issue", "--display-agent", label]
+    ]
+    # Set once the agent is running, so its detection cannot replace it.
+    names = [" ".join(c[1:3]) for c in calls]
+    assert names.index("agent start") < names.index("pane report-metadata")
+
+
 @pytest.mark.parametrize(
     "args",
     [

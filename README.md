@@ -35,12 +35,11 @@ reproduce, the app would not run, or a criterion needs a person's judgment),
 the session marks the PR ready, says what it could and could not verify,
 gives steps for you to check the rest, and merges only once you approve.
 
-Once the session opens its PR, the line under the workspace in Herdr's
-sidebar changes from the agent name to `Issue: #123 · PR #456`
-(`Issues: #123, #124 · PR #456` for several). The plugin's `PostToolUse` hook
-does this after any `gh pr` command on an `issue/` branch in a Herdr pane,
-so it also puts the label back after a Herdr restart; it leaves other
-sessions alone. Only the displayed name changes; the agent keeps its name.
+The line under the workspace in Herdr's sidebar shows `Issue: #123` in place
+of the agent name (`Issues: #123, #124` for several), and once the session
+opens its PR, `Issue: #123 · PR #456`. The plugin's `PostToolUse` hook adds the
+PR after any `gh pr` command on an `issue/` branch in a Herdr pane, so it also
+puts the label back after a Herdr restart; it leaves other sessions alone. Only the displayed name changes; the agent keeps its name.
 To set it by hand from the session's pane, run
 `plugins/herdr-issue/scripts/show-pr [<PR>]`.
 

@@ -385,6 +385,21 @@ for attempt in $(seq 1 30); do
     sleep 1
 done
 
+# Name the issues on the sidebar line under the workspace, where the agent
+# name would show; the agent keeps its name. The plugin's hook adds the PR
+# once there is one (scripts/show-pr). Display only, so a failure just warns.
+if [[ -n "$multi" ]]; then
+    sidebar="$(printf ', #%s' "${issues[@]}")"
+    sidebar="Issues: ${sidebar:2}"
+else
+    sidebar="Issue: #${issues[0]}"
+fi
+if ! herdr pane report-metadata "$pane_id" \
+    --source herdr-issue \
+    --display-agent "$sidebar" >/dev/null; then
+    echo "Warning: could not name the issue${multi:+s} in Herdr's sidebar." >&2
+fi
+
 # Submit and return immediately. Herdr owns the running agent from here.
 herdr agent prompt "$agent_name" "$prompt" >/dev/null
 
