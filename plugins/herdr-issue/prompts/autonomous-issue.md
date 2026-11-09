@@ -307,6 +307,18 @@ every check on the current head has passed, required or not, it merges. It
 may have merged {{DEFAULT_BRANCH}} into the remote branch, so pull before you
 push again.
 
+When {{DEFAULT_BRANCH}} requires a merge queue, pr-land never updates the
+branch. Once every check has passed it adds the PR to the queue and follows it
+until the PR merges, which can take an hour or more after the checks go
+green. The queue merges with its own method and commit message, not your merge
+flags, so write each branch commit message as it should read on
+{{DEFAULT_BRANCH}}. Put `Closes #N` only in the PR body, since a squash may keep
+every commit message. To merge a PR yourself where the queue is required, add it
+to the queue rather than running `gh pr merge`:
+
+    gh api graphql -f id="$(gh pr view <PR number> --json id -q .id)" \
+      -f query='mutation($id: ID!) { enqueuePullRequest(input: {pullRequestId: $id}) { clientMutationId } }'
+
 pr-land runs apart from the Monitor. When the Monitor expires, run the same
 command again to follow it. Stopping the Monitor does not stop the landing:
 to stop it, for example when I ask you to hold off, run
@@ -325,8 +337,15 @@ stopped:
 - the PR's head does not contain your HEAD: push, and run pr-land again.
 - blocked although every check passed: find the rule or review that blocks it
   (`gh pr view`, the repository's rules) and deal with that.
+- the merge queue removed the PR, with the queue's reason: when the queue's
+  checks failed, find the merge group's run (`gh run list --event
+  merge_group`). Fix the change if it caused the failure, or else run pr-land
+  again to queue the PR again. On a conflict, merge {{DEFAULT_BRANCH}},
+  resolve it, push, and run pr-land again.
+- could not add the PR to the merge queue: deal with GitHub's reason, then run
+  pr-land again.
 - gh accepted the merge but the PR is still open: the PR is in a merge queue;
-  follow the queue rather than running pr-land again.
+  run pr-land again to follow it.
 - no checks were reported: when the repository runs no CI for this change,
   merge it yourself with `gh pr merge` and the same flags.
 - checks still pending after two hours: find the stuck check and deal with

@@ -72,6 +72,15 @@ its last line, on checks that fail on two polls in a row, a merge conflict, a
 draft, checks pending for two hours, or a block other than CI, and the
 session takes over.
 
+When the base branch requires a merge queue, pr-land never updates the branch.
+Once every check passes, it adds the PR to the queue through GraphQL
+(`enqueuePullRequest`, pinned to the head whose checks passed), because
+`gh pr merge` cannot add a PR to the queue in a repository without auto-merge.
+It then follows the queue until the PR merges. If the queue removes the PR
+without merging it, pr-land stops and gives the queue's reason. The queue
+merges with its own method and commit message, so the flags after `--` do not
+apply there. `pr-land --stop` stops the lander but leaves the PR in the queue.
+
 The lander runs apart from the command that started it and logs under
 `.git/herdr-issue/`. Running the command again for the same PR follows the
 lander already running, so a Monitor can expire and be re-armed.

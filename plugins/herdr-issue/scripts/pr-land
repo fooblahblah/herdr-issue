@@ -10,7 +10,10 @@ usage() {
 
 # pr-land lands one PR: it keeps the branch current with its base, merges once
 # every check on the current head passes, and stops with the reason when a
-# person or the session has to act. The work is done by a lander running
+# person or the session has to act. When the base branch requires a merge
+# queue, it adds the PR to the queue instead, never updates the branch (the
+# queue tests the PR on top of the base itself), and follows the queue until
+# the PR merges or the queue removes it. The work is done by a lander running
 # apart from this command, which only follows the lander's log. A Monitor
 # that runs this command can expire and be re-armed without stopping the
 # lander: running it again for the same PR reattaches. `pr-land --stop`
@@ -265,6 +268,20 @@ oneline() {
     { grep -v -e '--admin' || true; } | tr '\n' ' ' | sed -e 's/  */ /g' -e 's/ $//'
 }
 
+# The merge queue, read through GraphQL since gh pr view does not show it:
+# whether the base branch requires one, the PR's place in it, and why the
+# queue last removed the PR.
+# shellcheck disable=SC2016 # GraphQL variables, not shell.
+queue_query='query($id: ID!) { node(id: $id) { ... on PullRequest {
+    isMergeQueueEnabled
+    mergeQueueEntry { state position }
+    timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
+        nodes { ... on RemovedFromMergeQueueEvent { reason } } } } } }'
+# shellcheck disable=SC2016
+enqueue_mutation='mutation($id: ID!, $oid: GitObjectID!) {
+    enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $oid}) {
+        mergeQueueEntry { position } } }'
+
 # Whether the base branch requires branches to be up to date before merging,
 # through branch protection or a ruleset. Without that rule a branch behind
 # its base merges as it is, so it is never updated.
@@ -345,6 +362,11 @@ open_polls=0
 updated_from=""
 cancel_from=""
 merge_requested=""
+queue=""
+queue_entry=""
+removed_reason=""
+queued_head=""
+dequeued_polls=0
 seen_head=""
 head_since=0
 
@@ -358,7 +380,7 @@ while :; do
     fi
 
     # stderr goes to a file so a warning cannot corrupt the JSON.
-    if ! pr_json="$(gh pr view "$n" --json state,isDraft,mergeStateStatus,headRefOid,headRefName,baseRefName,statusCheckRollup 2>"$err_file")"; then
+    if ! pr_json="$(gh pr view "$n" --json id,state,isDraft,mergeStateStatus,headRefOid,headRefName,baseRefName,statusCheckRollup 2>"$err_file")"; then
         gh_failures=$((gh_failures + 1))
         if ((gh_failures >= patience)); then
             finish 1 "stop: gh pr view failed ${patience} times in a row: $(oneline <"$err_file")"
@@ -375,6 +397,7 @@ while :; do
         expected_polls=0
     fi
 
+    pr_id="$(jq -r '.id' <<<"$pr_json")"
     state="$(jq -r '.state' <<<"$pr_json")"
     draft="$(jq -r '.isDraft' <<<"$pr_json")"
     merge_state="$(jq -r '.mergeStateStatus' <<<"$pr_json")"
@@ -383,6 +406,17 @@ while :; do
     base="$(jq -r '.baseRefName' <<<"$pr_json")"
     checks="$(jq -r "$checks_filter" <<<"$pr_json")"
     short="${head:0:7}"
+
+    # A failed read of the queue keeps what the last one found.
+    if queue_json="$(gh api graphql -f query="$queue_query" -f id="$pr_id" 2>/dev/null)" &&
+        queue_json="$(jq -ce '.data.node | select(. != null)' <<<"$queue_json" 2>/dev/null)"; then
+        if [[ -z "$queue" ]] && jq -e '.isMergeQueueEnabled == true' <<<"$queue_json" >/dev/null; then
+            queue=1
+            log "the base branch requires a merge queue: pr-land adds the PR to it, and the queue's own merge method applies"
+        fi
+        queue_entry="$(jq -r '.mergeQueueEntry // empty | "position \(.position) (\(.state | ascii_downcase | gsub("_"; " ")))"' <<<"$queue_json")"
+        removed_reason="$(jq -r '.timelineItems.nodes[-1].reason // empty' <<<"$queue_json" 2>/dev/null || true)"
+    fi
 
     if [[ "$head" != "$seen_head" ]]; then
         # Only once the branch has really moved past the head it was updated
@@ -393,6 +427,9 @@ while :; do
         fi
         seen_head="$head"
         head_since="$now"
+        # A new head leaves the queue; it is queued again once its checks pass.
+        queued_head=""
+        dequeued_polls=0
         blocked_polls=0
         no_check_polls=0
         behind_polls=0
@@ -436,6 +473,25 @@ while :; do
         fi
     fi
 
+    if [[ -n "$queue_entry" ]]; then
+        queued_head="$head"
+        dequeued_polls=0
+        note "${short} is in the merge queue at ${queue_entry}"
+        sleep "$interval"
+        continue
+    fi
+    # Out of the queue on the head that was in it, and not merged: confirmed
+    # over a few polls, since GitHub can show the PR leaving the queue a
+    # moment before it shows it merged.
+    if [[ -n "$queued_head" ]]; then
+        dequeued_polls=$((dequeued_polls + 1))
+        if ((dequeued_polls >= 3)); then
+            finish 1 "stop: the merge queue removed ${short} without merging it${removed_reason:+: ${removed_reason}}"
+        fi
+        sleep "$settle"
+        continue
+    fi
+
     if [[ "$merge_state" == DIRTY ]]; then
         finish 1 "stop: ${short} conflicts with the base branch; merge the base branch, resolve, push, then run pr-land again"
     fi
@@ -459,7 +515,9 @@ while :; do
     # be merged anyway. GitHub reports BEHIND for this, but not reliably while
     # required checks are pending, so ask how far behind the head is as well.
     behind=""
-    if [[ "$merge_state" == BEHIND ]]; then
+    if [[ -n "$queue" ]]; then
+        :
+    elif [[ "$merge_state" == BEHIND ]]; then
         behind=1
     else
         # A rule found stays found; its absence is checked again now and then,
@@ -532,7 +590,24 @@ while :; do
         continue
     fi
 
-    # Every check on the head has passed.
+    # Every check on the head has passed. A queue decides for itself whether
+    # the PR can merge, and says why not when it refuses it.
+    if [[ -n "$queue" && "$merge_state" != UNKNOWN ]]; then
+        if out="$(gh api graphql -f query="$enqueue_mutation" -f id="$pr_id" -f oid="$head" 2>&1)"; then
+            log "added ${short} to the merge queue"
+            queued_head="$head"
+            sleep "$settle"
+            continue
+        fi
+        merge_failures=$((merge_failures + 1))
+        out="$(oneline <<<"$out")"
+        log "adding ${short} to the merge queue failed: ${out}"
+        if ((merge_failures >= 3)); then
+            finish 1 "stop: could not add ${short} to the merge queue: ${out}"
+        fi
+        sleep "$interval"
+        continue
+    fi
     case "$merge_state" in
         CLEAN | HAS_HOOKS | UNSTABLE)
             if out="$(gh pr merge "$n" "${merge_flags[@]}" --match-head-commit "$head" 2>&1)"; then
