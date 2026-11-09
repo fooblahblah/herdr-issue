@@ -65,6 +65,24 @@ elif args[:2] == ["pr", "merge"]:
             "To have the pull request merged after all the requirements have been met, add the `--auto` flag.\n"
             "To use administrator privileges to immediately merge the pull request, add the `--admin` flag."
         )
+elif args[:2] == ["api", "graphql"]:
+    query = next(a.split("=", 1)[1] for a in args if a.startswith("query="))
+    if "enqueuePullRequest" in query:
+        if env.get("STUB_ENQUEUE_FAILS"):
+            fail("GraphQL: Pull request is not mergeable: required review is missing\nsecond line")
+        print(json.dumps({"data": {"enqueuePullRequest": {"mergeQueueEntry": {"position": 1}}}}))
+    else:
+        # The merge queue as of the PR state the last `gh pr view` returned.
+        fails = int(env.get("STUB_VIEW_FAILS", "0"))
+        try:
+            i = int(open(env["STUB_COUNTER"]).read()) - 1
+        except (FileNotFoundError, ValueError):
+            i = 0
+        states = json.load(open(env["STUB_STATES"]))
+        state = states[max(0, min(i - fails, len(states) - 1))]
+        queue = {"isMergeQueueEnabled": False, "mergeQueueEntry": None,
+                 "timelineItems": {"nodes": []}, **state.get("queue", {})}
+        print(json.dumps({"data": {"node": queue}}))
 elif args[:2] == ["run", "list"]:
     print(json.dumps([
         {"databaseId": 7, "status": "in_progress"},
@@ -122,6 +140,7 @@ def pr(merge_state: str = "CLEAN", head: str = OLD, checks=None, **extra) -> dic
         "mergeStateStatus": merge_state,
         "headRefOid": head,
         "headRefName": "issue/42-notional",
+        "id": "PR_42",
         "baseRefName": "main",
         "statusCheckRollup": [check("CI Gate")] if checks is None else checks,
         **extra,
@@ -130,6 +149,12 @@ def pr(merge_state: str = "CLEAN", head: str = OLD, checks=None, **extra) -> dic
 
 MERGED = pr(state="MERGED")
 PENDING = [check("CI Gate", status="IN_PROGRESS")]
+
+# The merge queue as GraphQL reports it: required by the base, holding the PR,
+# and having just removed it.
+QUEUE = {"isMergeQueueEnabled": True}
+QUEUED = {**QUEUE, "mergeQueueEntry": {"state": "AWAITING_CHECKS", "position": 2}}
+REMOVED = {**QUEUE, "timelineItems": {"nodes": [{"reason": "failed status checks"}]}}
 
 
 class Harness:
@@ -218,6 +243,16 @@ def harness(tmp_path: Path):
 
 def merges(calls: list) -> list:
     return [c[1:] for c in calls if c[1:3] == ["pr", "merge"]]
+
+
+def enqueues(calls: list) -> list:
+    """The (pull request id, expected head) of each enqueuePullRequest call."""
+    found = []
+    for c in calls:
+        fields = dict(a.split("=", 1) for a in c[3:] if "=" in a)
+        if c[1:3] == ["api", "graphql"] and "enqueuePullRequest" in fields.get("query", ""):
+            found.append((fields.get("id"), fields.get("oid")))
+    return found
 
 
 def updates(calls: list) -> list:
@@ -479,6 +514,86 @@ def test_a_refused_merge_is_retried_then_stops_on_one_line(harness):
     last = proc.stdout.splitlines()[-1]
     assert "stop: could not merge aaaaaaa: X Pull request #42 is not mergeable" in last
     assert "--admin" not in proc.stdout
+
+
+def test_a_merge_queue_gets_the_green_head_and_is_followed_until_it_merges(harness):
+    proc, calls = harness.run(
+        "42",
+        "--",
+        "--squash",
+        states=[pr(queue=QUEUE), pr(queue=QUEUED), pr(queue=QUEUED), MERGED],
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert merges(calls) == []
+    assert enqueues(calls) == [("PR_42", OLD)]
+    assert "the base branch requires a merge queue" in proc.stdout
+    assert proc.stdout.count("in the merge queue at position 2") == 1
+    assert proc.stdout.splitlines()[-1].endswith("#42 merged aaaaaaa")
+
+
+def test_a_merge_queue_branch_is_never_updated_from_the_base(harness):
+    proc, calls = harness.run(
+        "42",
+        "--",
+        "--squash",
+        states=[
+            pr("BEHIND", checks=PENDING, queue=QUEUE),
+            pr("BEHIND", queue=QUEUE),
+            pr(queue=QUEUED),
+            MERGED,
+        ],
+        STUB_STRICT="1",
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert updates(calls) == []
+    assert enqueues(calls) == [("PR_42", OLD)]
+
+
+def test_a_pr_already_in_the_queue_is_only_followed(harness):
+    proc, calls = harness.run("42", "--", "--squash", states=[pr(queue=QUEUED), MERGED])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert enqueues(calls) == []
+    assert merges(calls) == []
+
+
+def test_a_pr_the_queue_removes_stops_with_the_queues_reason(harness):
+    proc, calls = harness.run(
+        "42", "--", "--squash", states=[pr(queue=QUEUE), pr(queue=QUEUED), pr(queue=REMOVED)]
+    )
+    assert proc.returncode == 1
+    assert len(enqueues(calls)) == 1
+    assert proc.stdout.splitlines()[-1].endswith(
+        "stop: the merge queue removed aaaaaaa without merging it: failed status checks"
+    )
+
+
+def test_a_push_that_drops_the_pr_from_the_queue_queues_the_new_head(harness):
+    proc, calls = harness.run(
+        "42",
+        "--",
+        "--squash",
+        states=[
+            pr(queue=QUEUED),
+            pr(head=NEW, checks=PENDING, queue=REMOVED),
+            pr(head=NEW, queue=REMOVED),
+            pr(head=NEW, queue=QUEUED),
+            MERGED,
+        ],
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert enqueues(calls) == [("PR_42", NEW)]
+
+
+def test_a_refused_enqueue_is_retried_then_stops_on_one_line(harness):
+    proc, calls = harness.run(
+        "42", "--", "--squash", states=[pr(queue=QUEUE)], STUB_ENQUEUE_FAILS="1"
+    )
+    assert proc.returncode == 1
+    assert len(enqueues(calls)) == 3
+    assert proc.stdout.splitlines()[-1].endswith(
+        "stop: could not add aaaaaaa to the merge queue: GraphQL: Pull request is not "
+        "mergeable: required review is missing second line"
+    )
 
 
 def test_transient_gh_failures_are_retried(harness):
