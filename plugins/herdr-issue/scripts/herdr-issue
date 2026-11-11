@@ -2,7 +2,8 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: herdr-issue <issue-number>... [--plain | --ultracode]" >&2
+    echo "usage: herdr-issue <issue-number>... [--plain | --ultracode]" \
+        "[--model <model>] [--effort <level>]" >&2
     echo "Issue numbers may be separated by spaces or commas, and may start with #." >&2
     exit 2
 }
@@ -10,30 +11,54 @@ usage() {
 # With no flag the mode is detected further down: superpowers when the
 # Superpowers plugin is enabled, plain when it is not. --plain runs the
 # prompt's own workflow and --ultracode turns the session into ultracode; both
-# switch the Superpowers plugin off for the session.
+# switch the Superpowers plugin off for the session. --model and --effort
+# override the configured model and effort of this session (see
+# config/defaults.json).
 mode=""
+model_flag=""
+effort_flag=""
 issues=()
+
+# The /issue skill passes all of its arguments as one string, so split every
+# argument on whitespace and commas. read -d '' keeps going past newlines and
+# returns 1 at the end of its input, hence the || true.
+words=()
 for arg in "$@"; do
-    # The /issue skill passes all of its arguments as one string, so split
-    # every argument on whitespace and commas. read -d '' keeps going past
-    # newlines and returns 1 at the end of its input, hence the || true.
     read -r -d '' -a tokens <<<"${arg//,/ }" || true
-    for token in "${tokens[@]}"; do
-        case "$token" in
-            --plain | --ultracode)
-                [[ -z "$mode" || "$mode" == "${token#--}" ]] || usage
-                mode="${token#--}"
-                ;;
-            *)
-                # Accept GitHub's #123 form, as in "#123, #125, #111".
-                token="${token#\#}"
-                [[ "$token" =~ ^[0-9]+$ ]] || usage
-                token=$((10#$token))
-                # A number listed twice is launched once.
-                [[ " ${issues[*]} " == *" $token "* ]] || issues+=("$token")
-                ;;
-        esac
-    done
+    words+=("${tokens[@]}")
+done
+
+for ((i = 0; i < ${#words[@]}; i++)); do
+    token="${words[i]}"
+    case "$token" in
+        --plain | --ultracode)
+            [[ -z "$mode" || "$mode" == "${token#--}" ]] || usage
+            mode="${token#--}"
+            ;;
+        --model | --effort | --model=* | --effort=*)
+            if [[ "$token" == *=* ]]; then
+                value="${token#*=}"
+                token="${token%%=*}"
+            else
+                i=$((i + 1))
+                value="${words[i]:-}"
+            fi
+            [[ -n "$value" && "$value" != --* ]] || usage
+            if [[ "$token" == --model ]]; then
+                model_flag="$value"
+            else
+                effort_flag="$value"
+            fi
+            ;;
+        *)
+            # Accept GitHub's #123 form, as in "#123, #125, #111".
+            token="${token#\#}"
+            [[ "$token" =~ ^[0-9]+$ ]] || usage
+            token=$((10#$token))
+            # A number listed twice is launched once.
+            [[ " ${issues[*]} " == *" $token "* ]] || issues+=("$token")
+            ;;
+    esac
 done
 
 if [[ ${#issues[@]} -eq 0 ]]; then
@@ -57,6 +82,140 @@ repo="$(git rev-parse --show-toplevel)"
 # The plugin root is the parent of this script's directory, wherever the
 # plugin is installed.
 plugin_root="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
+
+# Models and effort levels come from the plugin's config/defaults.json, then
+# the user's config, then the repository's, each merged over the last, and
+# finally --model and --effort. Every file is checked before anything is
+# launched, so a typo cannot silently fall back to a default.
+#
+# The level goes on the command line as --effort, never as an exported
+# CLAUDE_CODE_EFFORT_LEVEL. That variable outranks every other effort source,
+# a subagent's own `effort:` included, so exporting it pinned final-reviewer
+# to the session's level (measured: with the variable set to high, an
+# `effort: xhigh` agent ran at high; with --effort high, it ran at xhigh).
+config_files=("$plugin_root/config/defaults.json")
+for f in "${XDG_CONFIG_HOME:-$HOME/.config}/herdr-issue/config.json" \
+    "$repo/.claude/herdr-issue.json"; do
+    if [[ -f "$f" ]]; then
+        config_files+=("$f")
+    fi
+done
+
+if ! resolved="$(
+    jq -n -r --arg mode "$mode" --arg model "$model_flag" --arg effort "$effort_flag" '
+        def efforts: ["low", "medium", "high", "xhigh", "max"];
+        # Subagents are dispatched through the Agent tool, which takes only
+        # these names.
+        def aliases: ["haiku", "sonnet", "opus", "fable"];
+        def one_of: "must be one of \(join(", "))";
+        # The session model goes on the command line, so it may also be a
+        # full model ID, but never anything a shell or prompt could misread.
+        def model_name: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._\\[\\]-]*$");
+
+        def section_errors($path; $session; $tier):
+            if type != "object" then "\($path) must be a JSON object"
+            else
+                (keys_unsorted[] | select(IN("model", "effort") | not)
+                    | "unknown key \($path).\(.)"),
+                (if has("model") then
+                    if $session then
+                        if .model | model_name then empty
+                        else "\($path).model is not a model name" end
+                    elif IN(.model; aliases[]) then empty
+                    else "\($path).model \(aliases | one_of)" end
+                else empty end),
+                # A tier effort of null means the subagent inherits the
+                # session level, as it does when none is set.
+                (if has("effort") then
+                    if IN(.effort; efforts[]) or ($tier and .effort == null) then empty
+                    else "\($path).effort \(efforts | one_of)" end
+                else empty end)
+            end;
+
+        def config_errors:
+            if type != "object" then "must hold a JSON object"
+            else
+                (keys_unsorted[]
+                    | select(IN("coordinator", "ultracode_coordinator", "tiers", "final_review") | not)
+                    | "unknown key \(.)"),
+                (if has("coordinator") then
+                    .coordinator | section_errors("coordinator"; true; false)
+                else empty end),
+                (if has("ultracode_coordinator") then
+                    .ultracode_coordinator | section_errors("ultracode_coordinator"; true; false)
+                else empty end),
+                (if has("final_review") then
+                    .final_review | section_errors("final_review"; false; false)
+                else empty end),
+                (if has("tiers") then
+                    .tiers
+                    | if type != "object" then "tiers must be a JSON object"
+                    else
+                        to_entries[]
+                        | if IN(.key; "light", "standard", "heavy") then
+                            .key as $tier | .value | section_errors("tiers.\($tier)"; false; true)
+                        else "unknown key tiers.\(.key)" end
+                    end
+                else empty end)
+            end;
+
+        reduce inputs as $file ({config: {}, errors: []};
+            .errors += [$file | config_errors | "\(input_filename): \(.)"]
+            | if ($file | type) == "object" then .config *= $file else . end)
+        | .errors += [
+            (if $model == "" or ($model | model_name) then empty
+                else "--model is not a model name" end),
+            (if $effort == "" or IN($effort; efforts[]) then empty
+                else "--effort \(efforts | one_of)" end)
+        ]
+        | if .errors != [] then
+            "\(.errors | join("\n"))\nNothing was launched.\n" | halt_error(1)
+        else .config end
+        # Ultracode sessions take the coordinator model unless their own is set.
+        | (if $mode == "ultracode" then
+            {model: .coordinator.model} + .ultracode_coordinator
+        else .coordinator end) as $session
+        | ($session
+            | if $model != "" then .model = $model else . end
+            | if $effort != "" then .effort = $effort else . end
+        ) as $session
+        | $session.model, $session.effort,
+          (.tiers | .light, .standard, .heavy | .model, .effort // ""),
+          .final_review.model, .final_review.effort
+    ' "${config_files[@]}"
+)"; then
+    exit 1
+fi
+{
+    read -r session_model
+    read -r session_effort
+    read -r light_model
+    read -r light_effort
+    read -r standard_model
+    read -r standard_effort
+    read -r heavy_model
+    read -r heavy_effort
+    read -r review_model
+    read -r review_effort
+} <<<"$resolved"
+
+# The names the prompt uses. Each alias names the model it currently selects
+# in Claude Code; a full model ID reads as itself.
+model_name() {
+    case "$1" in
+        opus) echo "Opus 5.5" ;;
+        sonnet) echo "Sonnet 5.5" ;;
+        haiku) echo "Haiku 5.5" ;;
+        fable) echo "Fable 5.2" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# A routing tier as the prompt names it: "Sonnet 5.5", or with its own
+# effort, "Opus 5.5 at medium effort".
+tier_name() {
+    echo "$(model_name "$1")${2:+ at $2 effort}"
+}
 
 # Make sure Herdr is available/running.
 if ! herdr status server >/dev/null 2>&1; then
@@ -217,7 +376,13 @@ done
 # value is ever read as a pattern or an escape.
 prompt="$(
     MODE="$mode" MULTI="$multi" ISSUES="$issues_text" ISSUE_URL="${urls[0]}" \
-        DEFAULT_BRANCH="$base" PR_LAND="${plugin_root}/scripts/pr-land" awk '
+        DEFAULT_BRANCH="$base" PR_LAND="${plugin_root}/scripts/pr-land" \
+        COORDINATOR_MODEL="$(model_name "$session_model")" EFFORT="$session_effort" \
+        LIGHT_MODEL="$(tier_name "$light_model" "$light_effort")" \
+        STANDARD_MODEL="$(tier_name "$standard_model" "$standard_effort")" \
+        HEAVY_MODEL="$(tier_name "$heavy_model" "$heavy_effort")" \
+        FINAL_REVIEW_MODEL="$(model_name "$review_model")" \
+        FINAL_REVIEW_ALIAS="$review_model" FINAL_REVIEW_EFFORT="$review_effort" awk '
         function fail(msg) {
             printf "%s line %d: %s\n", FILENAME, FNR, msg > "/dev/stderr"
             bad = 1
@@ -234,6 +399,9 @@ prompt="$(
         BEGIN {
             split("superpowers plain ultracode multi", names, " ")
             for (i in names) known[names[i]] = 1
+            nvars = split("ISSUES ISSUE_URL PR_LAND DEFAULT_BRANCH COORDINATOR_MODEL EFFORT " \
+                "LIGHT_MODEL STANDARD_MODEL HEAVY_MODEL FINAL_REVIEW_MODEL " \
+                "FINAL_REVIEW_ALIAS FINAL_REVIEW_EFFORT", vars, " ")
             active[ENVIRON["MODE"]] = 1
             if (ENVIRON["MULTI"] != "") active["multi"] = 1
         }
@@ -257,10 +425,10 @@ prompt="$(
         hidden == 0 {
             if (ENVIRON["MULTI"] != "" && index($0, "{{ISSUE_URL}}"))
                 fail("{{ISSUE_URL}} names a single issue; use {{ISSUES}} to launch several")
-            line = replace($0, "{{ISSUES}}", ENVIRON["ISSUES"])
-            line = replace(line, "{{ISSUE_URL}}", ENVIRON["ISSUE_URL"])
-            line = replace(line, "{{PR_LAND}}", ENVIRON["PR_LAND"])
-            print replace(line, "{{DEFAULT_BRANCH}}", ENVIRON["DEFAULT_BRANCH"])
+            line = $0
+            for (i = 1; i <= nvars; i++)
+                line = replace(line, "{{" vars[i] "}}", ENVIRON[vars[i]])
+            print line
         }
         END {
             if (bad) exit 1
@@ -277,24 +445,13 @@ if [[ "$mode" != ultracode ]] && grep -qi ultracode <<<"$prompt"; then
     exit 1
 fi
 
-# New Claude sessions run Opus 5.5 at high effort. Opus 5.5 thinks longer per
+# By default sessions run Opus 5.5 at high effort. Opus 5.5 thinks longer per
 # turn than Opus 5 at the same level, most of all at xhigh, and its migration
-# guidance reserves xhigh for work with a measured gain. Subagents inherit this
-# level unless their definition sets one; the final whole-branch review keeps
-# xhigh through the plugin's final-reviewer agent (agents/final-reviewer.md).
-# Ultracode sessions stay at xhigh.
-#
-# The level goes on the command line as --effort, never as an exported
-# CLAUDE_CODE_EFFORT_LEVEL. That variable outranks every other effort source,
-# a subagent's own `effort:` included, so exporting it pinned final-reviewer
-# to the session's level (measured: with the variable set to high, an
-# `effort: xhigh` agent ran at high; with --effort high, it ran at xhigh).
-effort=high
-if [[ "$mode" == ultracode ]]; then
-    effort=xhigh
-fi
-
-agent_args=(--model opus --effort "$effort")
+# guidance reserves xhigh for work with a measured gain. Subagents inherit the
+# session level unless their tier or definition sets one; the final
+# whole-branch review is dispatched at its own configured level (xhigh by
+# default). Ultracode sessions default to xhigh.
+agent_args=(--model "$session_model" --effort "$session_effort")
 
 # Per-session settings for the modes that run without Superpowers: every
 # superpowers* plugin off, so its skills and SessionStart hook stay out of the
@@ -419,6 +576,7 @@ Workspace: ${workspace_id}
 Agent:     ${agent_name}
 Branch:    ${branch}
 Mode:      ${mode}${mode_note}
+Model:     ${session_model} (${session_effort} effort)
 $(printf 'Issue:     %s\n' "${urls[@]}")
 
 The Claude session is running independently in Herdr.

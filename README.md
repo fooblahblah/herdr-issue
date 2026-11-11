@@ -99,6 +99,57 @@ There are three modes, and the launch summary names the one used:
 `--plain` and `--ultracode` switch every `superpowers*` plugin off for the
 session.
 
+## Models and effort
+
+Out of the box the session runs Opus 5.5 at high effort (xhigh in ultracode).
+It routes subagents to Haiku 5.5, Sonnet 5.5 or Opus 5.5 by task, and runs
+the final whole-branch review on Opus 5.5 at xhigh. Every one of these choices
+can be changed in a JSON config, merged in this order with later sources
+winning key by key:
+
+1. `plugins/herdr-issue/config/defaults.json`, the shipped defaults;
+2. `~/.config/herdr-issue/config.json` (or `$XDG_CONFIG_HOME/herdr-issue/config.json`);
+3. `.claude/herdr-issue.json` in the repository;
+4. `--model` and `--effort` on the command line, for the session only.
+
+```json
+{
+  "coordinator": { "model": "fable", "effort": "high" },
+  "ultracode_coordinator": { "effort": "xhigh" },
+  "tiers": {
+    "light": { "model": "haiku" },
+    "standard": { "model": "opus", "effort": "medium" },
+    "heavy": { "model": "opus" }
+  },
+  "final_review": { "model": "fable", "effort": "high" }
+}
+```
+
+A file only needs the keys it changes. `{"tiers": {"standard": {"model": "opus", "effort": "medium"}}}`
+alone routes the everyday work to Opus 5.5 at medium effort.
+
+- `coordinator` is the session itself. Its model goes to `claude --model`, so
+  it may be an alias or a full model ID such as `claude-fable-5-2`.
+- `ultracode_coordinator` is the session under `--ultracode`. It takes the
+  coordinator's model unless it names its own.
+- `tiers` are the subagent routes the prompt describes: `light` for
+  transcription and single-file mechanical fixes, `standard` for most
+  implementation, `heavy` for design, hard debugging and judgment-heavy
+  review. A tier without an `effort` (or with `null`) inherits the session's.
+- `final_review` is the model and effort the session dispatches the
+  `final-reviewer` agent with.
+
+Tier and final-review models must be `haiku`, `sonnet`, `opus` or `fable`,
+the names Claude Code's Agent tool accepts. Effort is one of `low`, `medium`,
+`high`, `xhigh` or `max`. A config with an unknown key or a bad value
+launches nothing and names the file and key. The launch summary shows the
+session's model and effort.
+
+```
+/herdr-issue:issue 123 --model fable
+/herdr-issue:issue 123 --effort xhigh
+```
+
 ## Requirements
 
 `herdr` (server running), `gh` (authenticated), `git`, `jq`, and a GitHub
@@ -123,6 +174,16 @@ are launched, `multi`.
 `{{ISSUES}}` becomes the issue URLs as one phrase (`A`, `A and B`,
 `A, B and C`), `{{DEFAULT_BRANCH}}` the remote default branch, and
 `{{PR_LAND}}` the path of the plugin's `pr-land` script.
+
+The configured models fill these:
+
+- `{{COORDINATOR_MODEL}}` and `{{EFFORT}}`: the session's model name
+  (`Opus 5.5`) and effort (`high`);
+- `{{LIGHT_MODEL}}`, `{{STANDARD_MODEL}}` and `{{HEAVY_MODEL}}`: each routing
+  tier's model name, followed by ` at <effort> effort` when the tier sets one;
+- `{{FINAL_REVIEW_MODEL}}`: the final review's model name;
+  `{{FINAL_REVIEW_ALIAS}}` and `{{FINAL_REVIEW_EFFORT}}`: the model alias and
+  effort to dispatch it with.
 `{{ISSUE_URL}}` names a single issue: a template refuses to launch several
 issues when `{{ISSUE_URL}}` would reach the prompt; keep it inside a
 `{{^multi}}` section.

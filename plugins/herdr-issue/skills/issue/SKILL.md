@@ -1,7 +1,7 @@
 ---
 name: issue
 description: Launch one or more GitHub issues autonomously, together in one isolated Herdr worktree, session and PR (uses Superpowers when it is enabled; --plain runs without it, --ultracode runs an ultracode session)
-argument-hint: <issue-number>... [--plain | --ultracode]
+argument-hint: <issue-number>... [--plain | --ultracode] [--model <model>] [--effort <level>]
 disable-model-invocation: true
 allowed-tools: Bash
 ---

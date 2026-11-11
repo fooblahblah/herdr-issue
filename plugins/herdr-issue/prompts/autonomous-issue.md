@@ -132,50 +132,56 @@ follow them. Give each decision one line in the PR description.
 
 MODEL / SUBAGENT ROUTING
 
-Use Opus 5.5 as the parent coordinator.
+Use {{COORDINATOR_MODEL}} as the parent coordinator.
 
 {{#superpowers}}
 Explicitly choose an appropriate model for every dispatched subagent rather
-than allowing subagents to inherit Opus 5.5 simply because it is the parent
+than allowing subagents to inherit {{COORDINATOR_MODEL}} simply because it is the parent
 model.
 {{/superpowers}}
 {{#plain}}
 Explicitly choose an appropriate model for every dispatched subagent rather
-than allowing subagents to inherit Opus 5.5 simply because it is the parent
+than allowing subagents to inherit {{COORDINATOR_MODEL}} simply because it is the parent
 model.
 {{/plain}}
 {{#ultracode}}
 Explicitly choose an appropriate model for every workflow agent, through the
 `model` option of each `agent()` call, and for every subagent you dispatch
-directly, rather than letting them inherit Opus 5.5 simply because it is the
+directly, rather than letting them inherit {{COORDINATOR_MODEL}} simply because it is the
 parent model.
 {{/ultracode}}
 
-Use Haiku 5.5 for:
+Use {{LIGHT_MODEL}} for:
 - transcription tasks, where the plan already contains the complete code to
   write and the work is applying it and running the tests;
 - single-file mechanical fixes.
-The cheapest models take more turns on multi-step work, so do not use Haiku
-5.5 for reviews or for implementing from prose descriptions.
+The cheapest models take more turns on multi-step work, so do not use
+{{LIGHT_MODEL}} for reviews or for implementing from prose descriptions.
 
-Use Sonnet 5.5 by default for:
+Use {{STANDARD_MODEL}} by default for:
 - other mechanical implementation tasks;
 - localized 1-2 file changes with clear requirements;
 - straightforward regression tests;
 - repetitive or same-shape edits;
 - routine fixes for concrete review findings.
 
-Use Opus 5.5 for:
+Use {{HEAVY_MODEL}} for:
 - architecture and design;
 - difficult root-cause analysis or debugging;
 - concurrency, state-management, security, persistence, or other subtle work;
 - integration work spanning multiple components where judgment is required;
-- tasks where a Sonnet implementer discovers hidden complexity;
+- tasks where an implementer from the default tier above discovers hidden
+  complexity;
 - reviews requiring substantial judgment;
-- the final whole-branch review.
+- the final whole-branch review, with the model and effort given below.
 
 For task-scoped reviews, use the least expensive model that can reliably judge
-the diff. Escalate to Opus 5.5 for subtle, cross-cutting, or high-risk work.
+the diff. Escalate to {{HEAVY_MODEL}} for subtle, cross-cutting, or high-risk
+work.
+
+Where a model above names an effort level, pass that level as the subagent's
+effort. Otherwise leave its effort unset, so it inherits this session's
+{{EFFORT}} effort.
 
 TASK GRANULARITY
 
@@ -259,15 +265,17 @@ Continue autonomously through:
   acting on it, then fix and re-review until a round finds nothing new;
 {{/ultracode}}
 {{#superpowers}}
-- final whole-branch review with the `herdr-issue:final-reviewer` agent (Opus 5.5 at xhigh
-  effort; this session runs at high);
+- final whole-branch review with the `herdr-issue:final-reviewer` agent,
+  dispatched with model `{{FINAL_REVIEW_ALIAS}}` and effort `{{FINAL_REVIEW_EFFORT}}` (this session runs
+  at {{EFFORT}});
 {{/superpowers}}
 {{#plain}}
-- final whole-branch review with the `herdr-issue:final-reviewer` agent (Opus 5.5 at xhigh
-  effort; this session runs at high);
+- final whole-branch review with the `herdr-issue:final-reviewer` agent,
+  dispatched with model `{{FINAL_REVIEW_ALIAS}}` and effort `{{FINAL_REVIEW_EFFORT}}` (this session runs
+  at {{EFFORT}});
 {{/plain}}
 {{#ultracode}}
-- final whole-branch review using Opus 5.5;
+- final whole-branch review using {{FINAL_REVIEW_MODEL}};
 {{/ultracode}}
 - fresh final verification, including the after-the-fix automated
   verification of a customer-facing change.

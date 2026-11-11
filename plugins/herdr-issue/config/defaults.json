@@ -1,0 +1,10 @@
+{
+  "coordinator": { "model": "opus", "effort": "high" },
+  "ultracode_coordinator": { "effort": "xhigh" },
+  "tiers": {
+    "light": { "model": "haiku" },
+    "standard": { "model": "sonnet" },
+    "heavy": { "model": "opus" }
+  },
+  "final_review": { "model": "opus", "effort": "xhigh" }
+}
