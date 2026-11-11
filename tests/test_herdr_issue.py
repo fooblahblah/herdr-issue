@@ -93,6 +93,7 @@ class Harness:
         self.repo.mkdir()
 
         self.config_dir = tmp_path / "claude-config"
+        self.xdg_config = tmp_path / "xdg-config"
         self.log = tmp_path / "calls.jsonl"
 
     def run(
@@ -107,6 +108,8 @@ class Harness:
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             # Keep the real user settings out of Superpowers detection.
             "CLAUDE_CONFIG_DIR": str(self.config_dir),
+            # Keep the real user's herdr-issue config out of model selection.
+            "XDG_CONFIG_HOME": str(self.xdg_config),
             "STUB_LOG": str(self.log),
             "STUB_REPO": str(self.repo),
             "STUB_ISSUES": json.dumps(issues),
@@ -130,6 +133,18 @@ class Harness:
         (self.config_dir / "settings.json").write_text(
             json.dumps({"enabledPlugins": plugins})
         )
+
+    @property
+    def user_config(self) -> Path:
+        return self.xdg_config / "herdr-issue" / "config.json"
+
+    @property
+    def repo_config(self) -> Path:
+        return self.repo / ".claude" / "herdr-issue.json"
+
+    def write_config(self, path: Path, config: dict | str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(config if isinstance(config, str) else json.dumps(config))
 
 
 @pytest.fixture
@@ -589,3 +604,282 @@ def test_a_single_issue_failure_does_not_claim_a_group_launch(harness):
     assert "Issue #101 is not open (CLOSED)." in proc.stderr
     assert "Nothing was launched" not in proc.stderr
     assert launched_nothing(calls)
+
+
+# --- Model and effort selection -------------------------------------------------
+
+
+def claude_args(calls: list) -> list[str]:
+    start = agent_starts(calls)[0]
+    return start[start.index("--") + 1 :]
+
+
+def session_model(calls: list) -> tuple[str, str]:
+    args = claude_args(calls)
+    return args[args.index("--model") + 1], args[args.index("--effort") + 1]
+
+
+@pytest.mark.parametrize(
+    ("args", "effort"), [(("101",), "high"), (("101", "--ultracode"), "xhigh")]
+)
+def test_default_session_runs_opus(harness, args, effort):
+    proc, calls = harness.run(*args, issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert session_model(calls) == ("opus", effort)
+    assert f"Model:     opus ({effort} effort)\n" in proc.stdout
+
+
+@pytest.mark.parametrize("args", [("101",), ("101", "--ultracode")])
+def test_default_prompt_routes_as_before(harness, args):
+    proc, calls = harness.run(*args, issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    prompt = prompt_sent(calls)
+    flat = " ".join(prompt.split())
+    assert "{{" not in prompt
+    assert "Use Opus 5.5 as the parent coordinator." in prompt
+    assert "inherit Opus 5.5 simply because it is the parent" in flat
+    assert "Use Haiku 5.5 for:" in prompt
+    assert "do not use Haiku 5.5 for reviews" in flat
+    assert "Use Sonnet 5.5 by default for:" in prompt
+    assert "Use Opus 5.5 for:" in prompt
+    assert "Escalate to Opus 5.5 for subtle" in prompt
+
+
+def test_default_final_review_is_opus_at_xhigh(harness):
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    prompt = " ".join(prompt_sent(calls).split())
+    assert (
+        "`herdr-issue:final-reviewer` agent, dispatched with model `opus` and"
+        " effort `xhigh` (this session runs at high)"
+    ) in prompt
+
+
+def test_user_config_switches_the_coordinator(harness):
+    harness.write_config(harness.user_config, {"coordinator": {"model": "fable"}})
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert session_model(calls) == ("fable", "high")
+    prompt = prompt_sent(calls)
+    assert "Use Fable 5.2 as the parent coordinator." in prompt
+    assert "inherit Fable 5.2 simply because it is the parent" in " ".join(
+        prompt.split()
+    )
+    # The routing tiers are configured separately and keep their defaults.
+    assert "Use Opus 5.5 for:" in prompt
+
+
+def test_repo_config_merges_over_user_config(harness):
+    harness.write_config(harness.user_config, {"coordinator": {"model": "fable"}})
+    harness.write_config(harness.repo_config, {"coordinator": {"effort": "medium"}})
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert session_model(calls) == ("fable", "medium")
+    assert "this session runs at medium" in " ".join(prompt_sent(calls).split())
+
+
+def test_ultracode_follows_the_coordinator_model_and_keeps_its_own_effort(harness):
+    harness.write_config(harness.user_config, {"coordinator": {"model": "fable"}})
+    proc, calls = harness.run("101", "--ultracode", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert session_model(calls) == ("fable", "xhigh")
+
+
+def test_ultracode_coordinator_can_be_configured_apart(harness):
+    harness.write_config(
+        harness.repo_config,
+        {"ultracode_coordinator": {"model": "sonnet", "effort": "max"}},
+    )
+    proc, calls = harness.run("101", "--ultracode", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert session_model(calls) == ("sonnet", "max")
+    # A non-ultracode launch is unaffected.
+    harness.log.unlink()
+    proc, calls = harness.run("102", issues={"102": OPEN})
+    assert session_model(calls) == ("opus", "high")
+
+
+def test_standard_tier_can_be_opus_at_lower_effort(harness):
+    harness.write_config(
+        harness.repo_config,
+        {"tiers": {"standard": {"model": "opus", "effort": "medium"}}},
+    )
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    prompt = prompt_sent(calls)
+    assert "Use Opus 5.5 at medium effort by default for:" in prompt
+    assert "Sonnet" not in prompt
+    assert "Use Haiku 5.5 for:" in prompt
+    # The session itself is unchanged.
+    assert session_model(calls) == ("opus", "high")
+
+
+def test_every_tier_can_be_switched(harness):
+    harness.write_config(
+        harness.repo_config,
+        {
+            "tiers": {
+                "light": {"model": "sonnet", "effort": "low"},
+                "standard": {"model": "opus"},
+                "heavy": {"model": "fable", "effort": "high"},
+            }
+        },
+    )
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    prompt = prompt_sent(calls)
+    assert "Use Sonnet 5.5 at low effort for:" in prompt
+    assert "Use Opus 5.5 by default for:" in prompt
+    assert "Use Fable 5.2 at high effort for:" in prompt
+    assert "Escalate to Fable 5.2 at high effort for subtle" in prompt
+    assert "Haiku" not in prompt
+
+
+def test_final_review_can_be_switched(harness):
+    harness.write_config(
+        harness.user_config, {"final_review": {"model": "fable", "effort": "high"}}
+    )
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    prompt = " ".join(prompt_sent(calls).split())
+    assert "dispatched with model `fable` and effort `high`" in prompt
+
+
+def test_ultracode_final_review_uses_the_configured_model(harness):
+    harness.write_config(harness.user_config, {"final_review": {"model": "fable"}})
+    proc, calls = harness.run("101", "--ultracode", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "final whole-branch review using Fable 5.2" in prompt_sent(calls)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("101", "--model", "fable", "--effort", "xhigh"),
+        ("101", "--model=fable", "--effort=xhigh"),
+        ("101 --model fable --effort xhigh",),
+    ],
+)
+def test_flags_override_the_config(harness, args):
+    harness.write_config(
+        harness.repo_config, {"coordinator": {"model": "sonnet", "effort": "low"}}
+    )
+    proc, calls = harness.run(*args, issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert session_model(calls) == ("fable", "xhigh")
+    assert "Use Fable 5.2 as the parent coordinator." in prompt_sent(calls)
+
+
+def test_flags_apply_to_the_ultracode_coordinator(harness):
+    proc, calls = harness.run(
+        "101", "--ultracode", "--effort", "max", issues={"101": OPEN}
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert session_model(calls) == ("opus", "max")
+
+
+def test_a_full_model_id_reaches_the_session_verbatim(harness):
+    proc, calls = harness.run(
+        "101", "--model", "claude-fable-5-2", issues={"101": OPEN}
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert session_model(calls) == ("claude-fable-5-2", "high")
+    assert "Use claude-fable-5-2 as the parent coordinator." in prompt_sent(calls)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("101", "--model"),
+        ("101", "--effort"),
+        ("101", "--model", "--effort", "high"),
+        ("101", "--model="),
+    ],
+)
+def test_a_flag_without_its_value_launches_nothing(harness, args):
+    proc, calls = harness.run(*args, issues={"101": OPEN})
+    assert proc.returncode == 2
+    assert "usage:" in proc.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("where", "config", "error"),
+    [
+        ("repo", "{not json", "herdr-issue.json"),
+        (
+            "repo",
+            {"coordinator": {"effort": "extreme"}},
+            "coordinator.effort must be one of low, medium, high, xhigh, max",
+        ),
+        (
+            "user",
+            {"tiers": {"standard": {"model": "claude-opus-5-5"}}},
+            "tiers.standard.model must be one of haiku, sonnet, opus, fable",
+        ),
+        (
+            "user",
+            {"final_review": {"model": "gpt"}},
+            "final_review.model must be one of haiku, sonnet, opus, fable",
+        ),
+        ("repo", {"coordinater": {"model": "fable"}}, "unknown key coordinater"),
+        ("repo", {"tiers": {"medium": {"model": "opus"}}}, "unknown key tiers.medium"),
+        (
+            "repo",
+            {"coordinator": {"model": "fable; rm -rf /"}},
+            "coordinator.model is not a model name",
+        ),
+        (
+            "repo",
+            {"coordinator": {"effort": None}},
+            "coordinator.effort must be one of",
+        ),
+        ("repo", ["opus"], "must hold a JSON object"),
+    ],
+)
+def test_a_bad_config_launches_nothing(harness, where, config, error):
+    path = harness.repo_config if where == "repo" else harness.user_config
+    harness.write_config(path, config)
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 1
+    assert error in proc.stderr
+    assert str(path) in proc.stderr
+    assert launched_nothing(calls)
+
+
+@pytest.mark.parametrize(
+    ("args", "error"),
+    [
+        (("101", "--effort", "extreme"), "--effort must be one of low, medium"),
+        (("101", "--model", "opus;rm"), "--model is not a model name"),
+    ],
+)
+def test_a_bad_flag_value_launches_nothing(harness, args, error):
+    proc, calls = harness.run(*args, issues={"101": OPEN})
+    assert proc.returncode == 1
+    assert error in proc.stderr
+    assert launched_nothing(calls)
+
+
+def test_a_tier_effort_of_null_falls_back_to_inheriting(harness):
+    harness.write_config(
+        harness.user_config, {"tiers": {"standard": {"model": "opus", "effort": "low"}}}
+    )
+    harness.write_config(harness.repo_config, {"tiers": {"standard": {"effort": None}}})
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Use Opus 5.5 by default for:" in prompt_sent(calls)
+
+
+def test_the_shipped_defaults_file_matches_the_built_in_defaults():
+    defaults = json.loads((PLUGIN_ROOT / "config" / "defaults.json").read_text())
+    assert defaults == {
+        "coordinator": {"model": "opus", "effort": "high"},
+        "ultracode_coordinator": {"effort": "xhigh"},
+        "tiers": {
+            "light": {"model": "haiku"},
+            "standard": {"model": "sonnet"},
+            "heavy": {"model": "opus"},
+        },
+        "final_review": {"model": "opus", "effort": "xhigh"},
+    }
