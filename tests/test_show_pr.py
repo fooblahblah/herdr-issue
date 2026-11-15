@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[1] / "plugins" / "herdr-issue" / "scripts" / "show-pr"
-HOOKS = Path(__file__).resolve().parents[1] / "plugins" / "herdr-issue" / "hooks" / "hooks.json"
+SCRIPT = Path(__file__).resolve().parents[1] / "plugins" / "issue-herd" / "scripts" / "show-pr"
+HOOKS = Path(__file__).resolve().parents[1] / "plugins" / "issue-herd" / "hooks" / "hooks.json"
 
 STUB = r"""#!{python}
 import json, os, sys
@@ -101,7 +101,7 @@ def test_shows_the_issue_and_the_pr(tmp_path, pr):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert reports(calls) == [[
         "pane", "report-metadata", "w1:p1",
-        "--source", "herdr-issue",
+        "--source", "issue-herd",
         "--display-agent", "Issue: #3284 · PR #3301",
     ]]
 

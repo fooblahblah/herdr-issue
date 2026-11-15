@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: herdr-issue <issue-number>... [--plain | --ultracode]" \
+    echo "usage: issue-herd <issue-number>... [--plain | --ultracode]" \
         "[--model <model>] [--effort <level>] [--backend herdr|orca]" >&2
     echo "Issue numbers may be separated by spaces or commas, and may start with #." >&2
     exit 2
@@ -99,8 +99,8 @@ plugin_root="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
 # to the session's level (measured: with the variable set to high, an
 # `effort: xhigh` agent ran at high; with --effort high, it ran at xhigh).
 config_files=("$plugin_root/config/defaults.json")
-for f in "${XDG_CONFIG_HOME:-$HOME/.config}/herdr-issue/config.json" \
-    "$repo/.claude/herdr-issue.json"; do
+for f in "${XDG_CONFIG_HOME:-$HOME/.config}/issue-herd/config.json" \
+    "$repo/.claude/issue-herd.json"; do
     if [[ -f "$f" ]]; then
         config_files+=("$f")
     fi
@@ -629,7 +629,7 @@ agent_args=(--model "$session_model" --effort "$session_effort")
 # A --settings file outranks user and project settings, and it lives in the
 # repo's git dir, out of git's sight.
 if [[ -n "$needs_settings" ]]; then
-    settings_dir="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/herdr-issue"
+    settings_dir="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/issue-herd"
     mkdir -p "$settings_dir"
     session_settings="${settings_dir}/issue-${ids}.settings.json"
 
@@ -686,9 +686,9 @@ launch_herdr() {
     # The pane's shell may still be starting when the agent is started, so
     # wait until the shell has run a command. The printf assembles the marker
     # at run time, so the typed command line itself never matches.
-    herdr pane run "$pane_id" "printf '%s-%s\n' herdr-issue ready" >/dev/null
+    herdr pane run "$pane_id" "printf '%s-%s\n' issue-herd ready" >/dev/null
     herdr pane wait-output "$pane_id" \
-        --match "herdr-issue-ready" \
+        --match "issue-herd-ready" \
         --timeout 30000 >/dev/null
 
     agent_name="$(agent_name_for "$ids")"
@@ -726,7 +726,7 @@ launch_herdr() {
         sidebar="Issue: #${issues[0]}"
     fi
     if ! herdr pane report-metadata "$pane_id" \
-        --source herdr-issue \
+        --source issue-herd \
         --display-agent "$sidebar" >/dev/null; then
         echo "Warning: could not name the issue${multi:+s} in Herdr's sidebar." >&2
     fi

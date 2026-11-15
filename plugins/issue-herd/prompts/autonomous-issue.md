@@ -265,12 +265,12 @@ Continue autonomously through:
   acting on it, then fix and re-review until a round finds nothing new;
 {{/ultracode}}
 {{#superpowers}}
-- final whole-branch review with the `herdr-issue:final-reviewer` agent,
+- final whole-branch review with the `issue-herd:final-reviewer` agent,
   dispatched with model `{{FINAL_REVIEW_ALIAS}}` and effort `{{FINAL_REVIEW_EFFORT}}` (this session runs
   at {{EFFORT}});
 {{/superpowers}}
 {{#plain}}
-- final whole-branch review with the `herdr-issue:final-reviewer` agent,
+- final whole-branch review with the `issue-herd:final-reviewer` agent,
   dispatched with model `{{FINAL_REVIEW_ALIAS}}` and effort `{{FINAL_REVIEW_EFFORT}}` (this session runs
   at {{EFFORT}});
 {{/plain}}

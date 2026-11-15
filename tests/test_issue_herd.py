@@ -1,4 +1,4 @@
-"""herdr-issue launcher tests.
+"""issue-herd launcher tests.
 
 These drive the REAL script via subprocess with stub `herdr`, `orca`, `gh` and `git`
 on PATH, so no Herdr server, Orca runtime, GitHub call or git fetch happens. Every
@@ -21,11 +21,11 @@ from pathlib import Path
 
 import pytest
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugins" / "herdr-issue"
-SCRIPT = PLUGIN_ROOT / "scripts" / "herdr-issue"
+PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugins" / "issue-herd"
+SCRIPT = PLUGIN_ROOT / "scripts" / "issue-herd"
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("jq") is None, reason="herdr-issue needs jq"
+    shutil.which("jq") is None, reason="issue-herd needs jq"
 )
 
 # One stub serves git, gh and herdr; it dispatches on the name it was invoked as.
@@ -178,7 +178,7 @@ class Harness:
             "PATH": os.pathsep.join(path),
             # Keep the real user settings out of Superpowers detection.
             "CLAUDE_CONFIG_DIR": str(self.config_dir),
-            # Keep the real user's herdr-issue config out of model selection.
+            # Keep the real user's issue-herd config out of model selection.
             "XDG_CONFIG_HOME": str(self.xdg_config),
             "STUB_LOG": str(self.log),
             "STUB_REPO": str(self.repo),
@@ -212,11 +212,11 @@ class Harness:
 
     @property
     def user_config(self) -> Path:
-        return self.xdg_config / "herdr-issue" / "config.json"
+        return self.xdg_config / "issue-herd" / "config.json"
 
     @property
     def repo_config(self) -> Path:
-        return self.repo / ".claude" / "herdr-issue.json"
+        return self.repo / ".claude" / "issue-herd.json"
 
     def write_config(self, path: Path, config: dict | str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -259,7 +259,7 @@ def test_the_sidebar_names_the_issues_from_launch(harness, args, label):
     proc, calls = harness.run(*args, issues={n: OPEN for n in args})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert sidebar_labels(calls) == [
-        ["p1", "--source", "herdr-issue", "--display-agent", label]
+        ["p1", "--source", "issue-herd", "--display-agent", label]
     ]
     # Set once the agent is running, so its detection cannot replace it.
     names = [" ".join(c[1:3]) for c in calls]
@@ -318,7 +318,7 @@ def test_only_the_high_effort_session_routes_its_final_review_to_final_reviewer(
     proc, calls = harness.run(*args, issues={"101": OPEN})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     prompt = next(c for c in calls if c[:3] == ["herdr", "agent", "prompt"])[4]
-    assert ("`herdr-issue:final-reviewer` agent" in prompt) is routed
+    assert ("`issue-herd:final-reviewer` agent" in prompt) is routed
 
 
 def test_final_reviewer_agent_runs_at_xhigh():
@@ -517,7 +517,7 @@ def test_single_string_form_splits_and_applies_ultracode(harness):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     (start,) = agent_starts(calls)
     assert start[3] == "issue-101_102"
-    path = harness.repo / ".git" / "herdr-issue" / "issue-101_102.settings.json"
+    path = harness.repo / ".git" / "issue-herd" / "issue-101_102.settings.json"
     assert start[start.index("--settings") + 1] == str(path)
     assert json.loads(path.read_text())["ultracode"] is True
 
@@ -726,7 +726,7 @@ def test_default_final_review_is_opus_at_xhigh(harness):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     prompt = " ".join(prompt_sent(calls).split())
     assert (
-        "`herdr-issue:final-reviewer` agent, dispatched with model `opus` and"
+        "`issue-herd:final-reviewer` agent, dispatched with model `opus` and"
         " effort `xhigh` (this session runs at high)"
     ) in prompt
 
@@ -882,7 +882,7 @@ def test_a_flag_without_its_value_launches_nothing(harness, args):
 @pytest.mark.parametrize(
     ("where", "config", "error"),
     [
-        ("repo", "{not json", "herdr-issue.json"),
+        ("repo", "{not json", "issue-herd.json"),
         (
             "repo",
             {"coordinator": {"effort": "extreme"}},
@@ -1252,7 +1252,7 @@ def test_orca_refuses_ultracode(harness):
     assert "--ultracode is not available in Orca" in proc.stderr
     assert "Nothing was launched." in proc.stderr
     assert launched_nothing(calls)
-    assert not (harness.repo / ".git" / "herdr-issue").exists()
+    assert not (harness.repo / ".git" / "issue-herd").exists()
 
 
 def test_orca_refuses_plain_only_while_superpowers_is_enabled(harness):
@@ -1274,7 +1274,7 @@ def test_orca_refuses_plain_only_while_superpowers_is_enabled(harness):
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "Mode:      plain\n" in proc.stdout
         assert orca_create(calls)
-        assert not (harness.repo / ".git" / "herdr-issue").exists()
+        assert not (harness.repo / ".git" / "issue-herd").exists()
     # Enabled for the user and disabled only in the gitignored local file,
     # which the new worktree does not have: the session would get the plugin.
     harness.enable_plugins({SUPERPOWERS: True})
