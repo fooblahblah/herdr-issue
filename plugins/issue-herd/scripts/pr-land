@@ -88,7 +88,7 @@ else
     pr_branch="$(jq -r '.headRefName' <<<"$pr_json")"
 fi
 
-state_dir="$(git rev-parse --path-format=absolute --git-common-dir)/herdr-issue"
+state_dir="$(git rev-parse --path-format=absolute --git-common-dir)/issue-herd"
 log_file="${state_dir}/pr-land-${n}.log"
 pid_file="${state_dir}/pr-land-${n}.pid"
 status_file="${state_dir}/pr-land-${n}.status"

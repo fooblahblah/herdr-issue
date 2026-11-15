@@ -1,13 +1,13 @@
 {
-  "name": "herdr-issue",
-  "description": "Herdr and Orca launchers for Claude Code",
+  "name": "issue-herd",
+  "description": "Launch GitHub issues as autonomous Claude Code sessions in Herdr or Orca",
   "owner": {
     "name": "Jeff Simpson"
   },
   "plugins": [
     {
-      "name": "herdr-issue",
-      "source": "./plugins/herdr-issue",
+      "name": "issue-herd",
+      "source": "./plugins/issue-herd",
       "description": "Launch GitHub issues autonomously in a Herdr or Orca worktree and Claude Code session; several issues named together share one worktree, session and PR"
     }
   ]

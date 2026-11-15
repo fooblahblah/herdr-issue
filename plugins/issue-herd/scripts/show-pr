@@ -48,7 +48,7 @@ show() {
     local issues
     issues="$(issues_label "$1")"
     herdr pane report-metadata "$HERDR_PANE_ID" \
-        --source herdr-issue \
+        --source issue-herd \
         --display-agent "${issues:+${issues} · }PR #$2"
 }
 
@@ -61,7 +61,7 @@ hook() {
     [[ -n "$dir" ]] || dir="$PWD"
     # gh as a word of its own: not ghx, my-gh or path/gh-wrapper.
     [[ "$command" =~ (^|[^[:alnum:]_./-])gh[[:space:]]+pr([[:space:]]|$) ]] || return 0
-    # Only herdr-issue sessions; the plugin's hook runs in every session.
+    # Only issue-herd sessions; the plugin's hook runs in every session.
     [[ -n "$(issues_label "$dir")" ]] || return 0
     pr="$(branch_pr "$dir")"
     [[ "$pr" =~ ^[0-9]+$ ]] || return 0

@@ -9,5 +9,5 @@ allowed-tools: Bash
 Launch GitHub issues $ARGUMENTS together in one worktree, Claude Code session and PR, in Herdr or Orca.
 
 ```!
-"${CLAUDE_PLUGIN_ROOT}/scripts/herdr-issue" "$ARGUMENTS"
+"${CLAUDE_PLUGIN_ROOT}/scripts/issue-herd" "$ARGUMENTS"
 ```

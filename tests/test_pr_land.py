@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugins" / "herdr-issue"
+PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugins" / "issue-herd"
 SCRIPT = PLUGIN_ROOT / "scripts" / "pr-land"
 
 pytestmark = pytest.mark.skipif(
@@ -173,7 +173,7 @@ class Harness:
         self.states = tmp_path / "states.json"
         self.counter = tmp_path / "counter"
         self.compare_file = tmp_path / "compare.json"
-        self.state_dir = self.repo / ".git" / "herdr-issue"
+        self.state_dir = self.repo / ".git" / "issue-herd"
 
     def env(self, **extra: str) -> dict:
         return {

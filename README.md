@@ -1,4 +1,4 @@
-# herdr-issue
+# issue-herd
 
 A Claude Code plugin that launches GitHub issues autonomously in a worktree
 and Claude Code session of [Herdr](https://herdr.dev) or
@@ -6,19 +6,19 @@ and Claude Code session of [Herdr](https://herdr.dev) or
 one worktree, session and PR.
 
 ```
-/herdr-issue:issue 123
-/herdr-issue:issue 123 124, 125
-/herdr-issue:issue #123, #124, #125
-/herdr-issue:issue 123 --plain
-/herdr-issue:issue 123 --ultracode
-/herdr-issue:issue 123 --backend orca
+/issue-herd:issue 123
+/issue-herd:issue 123 124, 125
+/issue-herd:issue #123, #124, #125
+/issue-herd:issue 123 --plain
+/issue-herd:issue 123 --ultracode
+/issue-herd:issue 123 --backend orca
 ```
 
 The issues get one worktree, branched from the remote default branch, with a
 tab running Claude Code (named `agent` in Herdr) and a spare `shell` tab. One issue gets the
 branch `issue/<N>-<slug>`; several get `issue/<N>_<N>...-<slug>`, the slug
 taken from the first issue's title. The session is given the prompt in
-`plugins/herdr-issue/prompts/autonomous-issue.md` and every issue is assigned
+`plugins/issue-herd/prompts/autonomous-issue.md` and every issue is assigned
 to you. If any issue already has a worktree, alone or with others, or is not
 open, nothing is launched and every problem is reported.
 
@@ -76,7 +76,7 @@ adds the PR after any `gh pr` command on an `issue/` branch in a Herdr pane, so
 it also puts the label back after a Herdr restart; it leaves other sessions
 alone, Orca's included, where the workspace card shows the PR by itself. Only
 the displayed name changes; the agent keeps its name. To set it by hand from
-the session's pane, run `plugins/herdr-issue/scripts/show-pr [<PR>]`.
+the session's pane, run `plugins/issue-herd/scripts/show-pr [<PR>]`.
 
 The session reproduces the problem before fixing it, but a reproduction is
 not automatically a permanent test. Before the PR is ready it keeps a test
@@ -86,7 +86,7 @@ in the repository's less frequent tier; anything else stays out of the
 commit, recorded in the PR's Verification section. Where the repository
 documents its own test tiers, the session follows them.
 
-The session lands the PR with `plugins/herdr-issue/scripts/pr-land`, so
+The session lands the PR with `plugins/issue-herd/scripts/pr-land`, so
 sessions running side by side do not stall each other. Once only CI stands
 between the PR and its merge, the session runs it under a Monitor:
 
@@ -117,7 +117,7 @@ merges with its own method and commit message, so the flags after `--` do not
 apply there. `pr-land --stop` stops the lander but leaves the PR in the queue.
 
 The lander runs apart from the command that started it and logs under
-`.git/herdr-issue/`. Running the command again for the same PR follows the
+`.git/issue-herd/`. Running the command again for the same PR follows the
 lander already running, so a Monitor can expire and be re-armed.
 `pr-land --stop <PR>` stops it, and it stops itself after an hour with
 nothing following it.
@@ -142,9 +142,9 @@ the final whole-branch review on Opus 5.5 at xhigh. Every one of these choices
 can be changed in a JSON config, merged in this order with later sources
 winning key by key:
 
-1. `plugins/herdr-issue/config/defaults.json`, the shipped defaults;
-2. `~/.config/herdr-issue/config.json` (or `$XDG_CONFIG_HOME/herdr-issue/config.json`);
-3. `.claude/herdr-issue.json` in the repository;
+1. `plugins/issue-herd/config/defaults.json`, the shipped defaults;
+2. `~/.config/issue-herd/config.json` (or `$XDG_CONFIG_HOME/issue-herd/config.json`);
+3. `.claude/issue-herd.json` in the repository;
 4. `--model` and `--effort` on the command line, for the session only.
 
 ```json
@@ -181,8 +181,8 @@ launches nothing and names the file and key. The launch summary shows the
 session's model and effort.
 
 ```
-/herdr-issue:issue 123 --model fable
-/herdr-issue:issue 123 --effort xhigh
+/issue-herd:issue 123 --model fable
+/issue-herd:issue 123 --effort xhigh
 ```
 
 ## Requirements
@@ -193,8 +193,8 @@ it), `gh` (authenticated), `git`, `jq`, and a GitHub `origin` remote.
 ## Install
 
 ```
-/plugin marketplace add fooblahblah/herdr-issue
-/plugin install herdr-issue@herdr-issue
+/plugin marketplace add fooblahblah/issue-herd
+/plugin install issue-herd@issue-herd
 ```
 
 ## Per-repository prompt
