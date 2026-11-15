@@ -1,9 +1,13 @@
 """herdr-issue launcher tests.
 
-These drive the REAL script via subprocess with stub `herdr`, `gh` and `git` on PATH,
-so no Herdr server, GitHub call or git fetch happens. Every stub call appends its argv
-as one JSON line to a log, so a test can assert exactly which calls the script made.
-Real `jq` is required: the script parses every Herdr and gh reply with it.
+These drive the REAL script via subprocess with stub `herdr`, `orca`, `gh` and `git`
+on PATH, so no Herdr server, Orca runtime, GitHub call or git fetch happens. Every
+stub call appends its argv as one JSON line to a log, so a test can assert exactly
+which calls the script made. Real `jq` is required: the script parses every host
+and gh reply with it.
+
+By default the stub Herdr server is up and the stub Orca is not, and neither
+host's environment variable is set, so a launch is detected as Herdr's.
 """
 
 from __future__ import annotations
@@ -38,6 +42,16 @@ if tool == "git":
         print(os.environ["STUB_REPO"])
     elif args[-1] == "--git-common-dir":
         print(os.path.join(os.environ["STUB_REPO"], ".git"))
+    elif args[-3:] == ["worktree", "list", "--porcelain"]:
+        # By default only the main checkout, on main.
+        worktrees = json.loads(os.environ.get("STUB_GIT_WORKTREES") or "null") or [
+            {"path": os.environ["STUB_REPO"], "branch": "refs/heads/main"}
+        ]
+        for wt in worktrees:
+            print(f"worktree {wt['path']}")
+            print("HEAD 0123456789abcdef0123456789abcdef01234567")
+            print(f"branch {wt['branch']}" if "branch" in wt else "detached")
+            print()
     elif args[-1] == "refs/remotes/origin/HEAD":
         head = os.environ.get("STUB_ORIGIN_HEAD")
         if not head:
@@ -60,7 +74,9 @@ elif tool == "gh":
     elif args[:2] != ["issue", "edit"]:
         sys.exit(f"stub gh: unexpected {args}")
 elif tool == "herdr":
-    if args[:2] == ["worktree", "list"]:
+    if args[:2] == ["status", "server"]:
+        sys.exit(0 if os.environ.get("STUB_HERDR_UP") == "1" else 1)
+    elif args[:2] == ["worktree", "list"]:
         worktrees = json.loads(os.environ.get("STUB_WORKTREES", "[]"))
         print(json.dumps({"result": {"worktrees": worktrees}}))
     elif args[:2] == ["worktree", "create"]:
@@ -71,9 +87,42 @@ elif tool == "herdr":
         }}))
     elif args[:2] == ["agent", "start"] and not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", args[2]):
         sys.exit(f"invalid_agent_name: {args[2]}")
-    # status server, tab rename/create, pane run/wait-output and
-    # agent list/prompt all succeed silently.
+    # tab rename/create, pane run/wait-output and agent list/prompt all
+    # succeed silently.
+elif tool == "orca":
+    if args[:1] == ["status"]:
+        if os.environ.get("STUB_ORCA_UP") != "1":
+            sys.exit("Orca is not running")
+        print(json.dumps({"ok": True, "result": {"runtime": {"reachable": True}}}))
+    elif args[:2] == ["worktree", "list"]:
+        if os.environ.get("STUB_ORCA_WARN") == "1":
+            print("warning: something on the side", file=sys.stderr)
+        if os.environ.get("STUB_ORCA_REPO_UNKNOWN") == "1":
+            print(json.dumps({"ok": False, "error": {"code": "repo_not_found"}}))
+            sys.exit(1)
+        worktrees = json.loads(os.environ.get("STUB_WORKTREES", "[]"))
+        print(json.dumps({"ok": True, "result": {"worktrees": worktrees}}))
+    elif args[:2] == ["worktree", "create"]:
+        if args[args.index("--model") + 1] == "haiku" and "--effort" in args:
+            print(json.dumps({"ok": False, "error": {"message": "does not support effort"}}))
+            sys.exit(1)
+        name = args[args.index("--name") + 1]
+        branch = args[args.index("--branch") + 1]
+        if os.environ.get("STUB_ORCA_BRANCH_TAKEN") == "1":
+            branch += "-2"
+        if os.environ.get("STUB_ORCA_WARN") == "1":
+            print("warning: something on the side", file=sys.stderr)
+        print(json.dumps({"ok": True, "result": {"worktree": {
+            "id": "r1::/wt/new", "path": "/wt/new", "displayName": name,
+            "branch": f"refs/heads/{branch}",
+        }}}))
+    elif args[:2] == ["terminal", "create"]:
+        print(json.dumps({"ok": True, "result": {"handle": "term_1"}}))
+    else:
+        sys.exit(f"stub orca: unexpected {args}")
 """
+
+HOST_VARS = ("HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE")
 
 OPEN = {"state": "OPEN", "title": "Notional issue title"}
 CLOSED = {"state": "CLOSED", "title": "Notional closed issue"}
@@ -86,7 +135,7 @@ class Harness:
         stub = self.bin / "stub"
         stub.write_text(STUB.replace("{python}", sys.executable))
         stub.chmod(0o755)
-        for tool in ("git", "gh", "herdr"):
+        for tool in ("git", "gh", "herdr", "orca"):
             (self.bin / tool).symlink_to(stub)
 
         self.repo = tmp_path / "repo"
@@ -102,10 +151,31 @@ class Harness:
         issues: dict,
         origin_head: str = "",
         worktrees: list | None = None,
+        git_worktrees: list | None = None,
+        herdr_up: bool = True,
+        orca_up: bool = False,
+        orca_repo_known: bool = True,
+        host_env: dict | None = None,
+        orca_on_path: bool = True,
+        stub_env: dict | None = None,
     ) -> tuple[subprocess.CompletedProcess, list]:
-        env = {
-            **os.environ,
-            "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+        # The tests may themselves run inside a Herdr pane or an Orca
+        # terminal; neither host's variables reach the script unless a test
+        # sets them.
+        env = {k: v for k, v in os.environ.items() if k not in HOST_VARS}
+        path = [str(self.bin), *os.environ["PATH"].split(os.pathsep)]
+        if not orca_on_path:
+            # Only in the shim directory Orca keeps under its config dir.
+            shim = self.xdg_config / "orca" / "linux-orca-cli-shim" / "orca"
+            shim.parent.mkdir(parents=True, exist_ok=True)
+            if (self.bin / "orca").is_symlink():
+                (self.bin / "orca").rename(shim)
+            real = [d for d in path[1:] if (Path(d) / "orca").exists()]
+            if any((Path(d) / "jq").exists() for d in real):
+                pytest.skip("a real orca shares a PATH directory with jq")
+            path = [d for d in path if d not in real]
+        env.update({
+            "PATH": os.pathsep.join(path),
             # Keep the real user settings out of Superpowers detection.
             "CLAUDE_CONFIG_DIR": str(self.config_dir),
             # Keep the real user's herdr-issue config out of model selection.
@@ -115,7 +185,13 @@ class Harness:
             "STUB_ISSUES": json.dumps(issues),
             "STUB_ORIGIN_HEAD": origin_head,
             "STUB_WORKTREES": json.dumps(worktrees or []),
-        }
+            "STUB_GIT_WORKTREES": json.dumps(git_worktrees),
+            "STUB_HERDR_UP": "1" if herdr_up else "0",
+            "STUB_ORCA_UP": "1" if orca_up else "0",
+            "STUB_ORCA_REPO_UNKNOWN": "0" if orca_repo_known else "1",
+            **(stub_env or {}),
+            **(host_env or {}),
+        })
         proc = subprocess.run(
             [str(SCRIPT), *args],
             env=env,
@@ -411,7 +487,7 @@ def created_worktree(calls: list) -> list:
 
 def launched_nothing(calls: list) -> bool:
     return (
-        not any(c[:3] == ["herdr", "worktree", "create"] for c in calls)
+        not any(c[1:3] == ["worktree", "create"] for c in calls)
         and agent_starts(calls) == []
         and not any(c[:3] == ["gh", "issue", "edit"] for c in calls)
     )
@@ -883,3 +959,347 @@ def test_the_shipped_defaults_file_matches_the_built_in_defaults():
         },
         "final_review": {"model": "opus", "effort": "xhigh"},
     }
+
+
+# --- Orca --------------------------------------------------------------------
+
+
+IN_ORCA = {"ORCA_TERMINAL_HANDLE": "term_0"}
+IN_HERDR = {"HERDR_PANE_ID": "w0:p0"}
+
+
+def orca_calls(calls: list) -> list:
+    return [c for c in calls if c[0] == "orca"]
+
+
+def herdr_calls(calls: list) -> list:
+    return [c for c in calls if c[0] == "herdr"]
+
+
+def orca_create(calls: list) -> list:
+    return next(c for c in calls if c[:3] == ["orca", "worktree", "create"])
+
+
+def flag(call: list, name: str) -> str:
+    return call[call.index(name) + 1]
+
+
+def flags(call: list, name: str) -> list[str]:
+    return [call[i + 1] for i, a in enumerate(call) if a == name]
+
+
+def test_a_herdr_pane_launches_in_herdr_even_when_orca_runs(harness):
+    proc, calls = harness.run(
+        "101", issues={"101": OPEN}, orca_up=True, host_env=IN_HERDR
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert agents_started(calls) == ["issue-101"]
+    assert orca_calls(calls) == []
+    assert "running independently in Herdr." in proc.stdout
+
+
+def test_an_orca_terminal_launches_in_orca_even_when_herdr_runs(harness):
+    proc, calls = harness.run(
+        "101", issues={"101": OPEN}, orca_up=True, host_env=IN_ORCA
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert herdr_calls(calls) == []
+    assert [c[1:3] for c in orca_calls(calls)] == [
+        ["status", "--json"],
+        ["worktree", "list"],
+        ["worktree", "create"],
+        ["terminal", "create"],
+    ]
+    assert "running independently in Orca." in proc.stdout
+
+
+def test_outside_both_hosts_the_running_one_is_used(harness):
+    proc, calls = harness.run("101", issues={"101": OPEN}, herdr_up=False, orca_up=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert herdr_calls(calls) == [["herdr", "status", "server"]]
+    assert orca_create(calls)
+    harness.log.unlink()
+    proc, calls = harness.run("102", issues={"102": OPEN}, herdr_up=True, orca_up=False)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert agents_started(calls) == ["issue-102"]
+    assert [c[1:3] for c in orca_calls(calls)] == [["status", "--json"]]
+
+
+def test_both_hosts_running_outside_either_needs_the_backend_flag(harness):
+    proc, calls = harness.run("101", issues={"101": OPEN}, orca_up=True)
+    assert proc.returncode == 1
+    assert "Both Herdr and Orca are running; pass --backend herdr or --backend orca." in proc.stderr
+    assert launched_nothing(calls)
+
+
+def test_neither_host_running_launches_nothing(harness):
+    proc, calls = harness.run("101", issues={"101": OPEN}, herdr_up=False)
+    assert proc.returncode == 1
+    assert "Neither Herdr nor Orca is running." in proc.stderr
+    assert launched_nothing(calls)
+
+
+@pytest.mark.parametrize("args", [("101", "--backend", "orca"), ("101 --backend=orca",)])
+def test_the_backend_flag_overrides_detection(harness, args):
+    proc, calls = harness.run(*args, issues={"101": OPEN}, orca_up=True, host_env=IN_HERDR)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert herdr_calls(calls) == []
+    assert orca_create(calls)
+
+
+def test_a_backend_flag_naming_a_stopped_host_launches_nothing(harness):
+    proc, calls = harness.run("101", "--backend", "orca", issues={"101": OPEN})
+    assert proc.returncode == 1
+    assert "Orca is not running. Start Orca first." in proc.stderr
+    assert launched_nothing(calls)
+
+
+@pytest.mark.parametrize("args", [("101", "--backend", "zed"), ("101", "--backend")])
+def test_a_bad_backend_is_a_usage_error(harness, args):
+    proc, calls = harness.run(*args, issues={"101": OPEN})
+    assert proc.returncode == 2
+    assert "usage:" in proc.stderr
+    assert calls == []
+
+
+def test_orca_creates_the_worktree_with_the_agent_and_prompt_in_one_call(harness):
+    proc, calls = harness.run("101", issues={"101": OPEN}, orca_up=True, host_env=IN_ORCA)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    create = orca_create(calls)
+    assert flag(create, "--repo") == f"path:{harness.repo}"
+    assert flag(create, "--name") == "#101 Notional issue title"
+    assert flag(create, "--branch") == "issue/101-notional-issue-title"
+    assert flag(create, "--base-branch") == "origin/main"
+    assert flags(create, "--reference") == [URL.format(101)]
+    assert flag(create, "--agent") == "claude"
+    assert flag(create, "--surface") == "terminal"
+    assert flag(create, "--model") == "opus"
+    assert flag(create, "--effort") == "high"
+    assert flag(create, "--prompt").startswith(f"Let's start working on {URL.format(101)}.\n")
+    assert "--no-parent" in create and "--json" in create
+    assert "--settings" not in create
+    shell = next(c for c in calls if c[:3] == ["orca", "terminal", "create"])
+    assert flag(shell, "--worktree") == "id:r1::/wt/new"
+    assert flag(shell, "--title") == "shell"
+    assert [c[3] for c in calls if c[:3] == ["gh", "issue", "edit"]] == ["101"]
+    assert proc.stdout.startswith("Launched issue #101\n")
+    assert "Workspace: #101 Notional issue title\n" in proc.stdout
+    assert "Agent:" not in proc.stdout
+    assert "Model:     opus (high effort)\n" in proc.stdout
+
+
+def test_orca_links_every_issue_of_a_shared_session(harness):
+    proc, calls = harness.run(
+        "101", "102", issues={"101": OPEN, "102": OPEN}, orca_up=True, host_env=IN_ORCA
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    create = orca_create(calls)
+    assert flags(create, "--reference") == [URL.format(101), URL.format(102)]
+    assert flag(create, "--branch") == "issue/101_102-notional-issue-title"
+    assert flag(create, "--name") == "#101 #102 Notional issue title"
+    assert proc.stdout.startswith("Launched issues #101 #102\n")
+
+
+def test_orca_follows_the_configured_model_and_flags(harness):
+    harness.write_config(harness.repo_config, {"coordinator": {"model": "fable"}})
+    proc, calls = harness.run(
+        "101", "--effort", "xhigh", issues={"101": OPEN}, orca_up=True, host_env=IN_ORCA
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    create = orca_create(calls)
+    assert (flag(create, "--model"), flag(create, "--effort")) == ("fable", "xhigh")
+    assert "Use Fable 5.2 as the parent coordinator." in flag(create, "--prompt")
+
+
+@pytest.mark.parametrize(
+    "branch",
+    ["refs/heads/issue/102-an-old-title", "refs/heads/issue/101_102-x", "issue/102-bare"],
+)
+def test_orca_refuses_an_issue_that_already_has_a_worktree(harness, branch):
+    worktrees = [{"branch": branch, "path": "/wt/existing", "displayName": "#102 Old"}]
+    # Git lists the same worktree; Orca's entry, with its workspace, is the one shown.
+    git_worktrees = [
+        {"path": str(harness.repo), "branch": "refs/heads/main"},
+        {"path": "/wt/existing", "branch": "refs/heads/" + branch.removeprefix("refs/heads/")},
+    ]
+    proc, calls = harness.run(
+        "102",
+        issues={"102": OPEN},
+        worktrees=worktrees,
+        git_worktrees=git_worktrees,
+        orca_up=True,
+        host_env=IN_ORCA,
+    )
+    assert proc.returncode == 1
+    assert "Issue #102 already has a worktree." in proc.stderr
+    assert "Workspace: #102 Old" in proc.stderr
+    assert "Agent:" not in proc.stderr
+    assert "Switch to workspace #102 Old in Orca to see it." in proc.stderr
+    assert launched_nothing(calls)
+
+
+@pytest.mark.parametrize(
+    ("backend", "host_env"), [("Herdr", IN_HERDR), ("Orca", IN_ORCA)]
+)
+def test_a_worktree_only_git_lists_still_holds_its_issue(harness, backend, host_env):
+    # Orca lists only the worktrees it made, so one made in Herdr (or by hand)
+    # is known only to git.
+    git_worktrees = [
+        {"path": str(harness.repo), "branch": "refs/heads/main"},
+        {"path": "/wt/detached"},
+        {"path": "/wt/elsewhere", "branch": "refs/heads/issue/102-made-elsewhere"},
+    ]
+    proc, calls = harness.run(
+        "102",
+        issues={"102": OPEN},
+        git_worktrees=git_worktrees,
+        orca_up=True,
+        host_env=host_env,
+    )
+    assert proc.returncode == 1
+    assert "Issue #102 already has a worktree." in proc.stderr
+    assert f"Workspace: (not made in {backend})" in proc.stderr
+    assert "Worktree:  /wt/elsewhere" in proc.stderr
+    assert f"It was made outside {backend}; see it where it was made." in proc.stderr
+    assert "Agent:" not in proc.stderr
+    assert "herdr worktree open" not in proc.stderr
+    assert launched_nothing(calls)
+
+
+def test_orca_names_the_repository_by_its_main_checkout(harness):
+    # Launched from a linked worktree, whose path Orca does not know.
+    git_worktrees = [
+        {"path": "/src/main-checkout", "branch": "refs/heads/main"},
+        {"path": str(harness.repo), "branch": "refs/heads/some-feature"},
+    ]
+    proc, calls = harness.run(
+        "101", issues={"101": OPEN}, git_worktrees=git_worktrees, orca_up=True, host_env=IN_ORCA
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    listed = next(c for c in calls if c[:3] == ["orca", "worktree", "list"])
+    assert flag(listed, "--repo") == "path:/src/main-checkout"
+    assert flag(orca_create(calls), "--repo") == "path:/src/main-checkout"
+
+
+def test_orca_other_branches_do_not_hold_the_issue(harness):
+    worktrees = [
+        {"branch": "refs/heads/main", "path": "/repo", "displayName": "main"},
+        {"branch": "refs/heads/issue/1020-x", "path": "/wt/other", "displayName": "x"},
+        {"path": "/wt/detached"},
+    ]
+    proc, calls = harness.run(
+        "102", issues={"102": OPEN}, worktrees=worktrees, orca_up=True, host_env=IN_ORCA
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert orca_create(calls)
+
+
+def test_orca_cli_is_found_in_its_config_dir_shim(harness):
+    # Orca's Linux CLI is a shim under its config dir, often not on PATH.
+    proc, calls = harness.run(
+        "101", "--backend", "orca", issues={"101": OPEN}, orca_up=True, orca_on_path=False
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert orca_create(calls)
+
+
+def test_a_missing_orca_cli_is_named_as_such(harness):
+    (harness.bin / "orca").unlink()
+    proc, calls = harness.run(
+        "101", "--backend", "orca", issues={"101": OPEN}, orca_up=True, orca_on_path=False
+    )
+    assert proc.returncode == 1
+    assert "The orca command was not found" in proc.stderr
+    assert launched_nothing(calls)
+
+
+def test_orca_warnings_do_not_stop_a_launch_and_its_branch_is_reported(harness):
+    proc, calls = harness.run(
+        "101",
+        issues={"101": OPEN},
+        orca_up=True,
+        host_env=IN_ORCA,
+        stub_env={"STUB_ORCA_WARN": "1", "STUB_ORCA_BRANCH_TAKEN": "1"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "warning: something on the side" in proc.stderr
+    assert "Branch:    issue/101-notional-issue-title-2\n" in proc.stdout
+    assert [c[3] for c in calls if c[:3] == ["gh", "issue", "edit"]] == ["101"]
+
+
+def test_orca_launches_haiku_without_an_effort(harness):
+    harness.write_config(harness.repo_config, {"coordinator": {"model": "haiku"}})
+    proc, calls = harness.run("101", issues={"101": OPEN}, orca_up=True, host_env=IN_ORCA)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "--effort" not in orca_create(calls)
+    assert "Model:     haiku\n" in proc.stdout
+
+
+def test_orca_must_know_the_repository(harness):
+    proc, calls = harness.run(
+        "101", issues={"101": OPEN}, orca_up=True, orca_repo_known=False, host_env=IN_ORCA
+    )
+    assert proc.returncode == 1
+    assert f"Orca does not know the repository at {harness.repo}." in proc.stderr
+    assert launched_nothing(calls)
+
+
+def test_orca_refuses_ultracode(harness):
+    proc, calls = harness.run(
+        "101", "--ultracode", issues={"101": OPEN}, orca_up=True, host_env=IN_ORCA
+    )
+    assert proc.returncode == 1
+    assert "--ultracode is not available in Orca" in proc.stderr
+    assert "Nothing was launched." in proc.stderr
+    assert launched_nothing(calls)
+    assert not (harness.repo / ".git" / "herdr-issue").exists()
+
+
+def test_orca_refuses_plain_only_while_superpowers_is_enabled(harness):
+    harness.enable_plugins({SUPERPOWERS: True})
+    proc, calls = harness.run(
+        "101", "--plain", issues={"101": OPEN}, orca_up=True, host_env=IN_ORCA
+    )
+    assert proc.returncode == 1
+    assert "--plain is not available in Orca while a Superpowers plugin is enabled" in proc.stderr
+    assert launched_nothing(calls)
+    # Without the plugin, or with it listed as disabled, plain needs no
+    # settings and launches.
+    for plugins in ({}, {SUPERPOWERS: False}):
+        harness.enable_plugins(plugins)
+        harness.log.unlink()
+        proc, calls = harness.run(
+            "102", "--plain", issues={"102": OPEN}, orca_up=True, host_env=IN_ORCA
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "Mode:      plain\n" in proc.stdout
+        assert orca_create(calls)
+        assert not (harness.repo / ".git" / "herdr-issue").exists()
+    # Enabled for the user and disabled only in the gitignored local file,
+    # which the new worktree does not have: the session would get the plugin.
+    harness.enable_plugins({SUPERPOWERS: True})
+    harness.write_config(
+        harness.repo / ".claude" / "settings.local.json",
+        {"enabledPlugins": {SUPERPOWERS: False}},
+    )
+    harness.log.unlink()
+    proc, calls = harness.run(
+        "102", "--plain", issues={"102": OPEN}, orca_up=True, host_env=IN_ORCA
+    )
+    assert proc.returncode == 1
+    assert launched_nothing(calls)
+
+
+def test_orca_runs_superpowers_when_the_plugin_is_enabled(harness):
+    harness.enable_plugins({SUPERPOWERS: True})
+    proc, calls = harness.run("101", issues={"101": OPEN}, orca_up=True, host_env=IN_ORCA)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Mode:      superpowers (Superpowers plugin detected;" in proc.stdout
+    assert "normal Superpowers\nworkflow" in flag(orca_create(calls), "--prompt")
+
+
+def test_orca_template_mistakes_create_nothing(harness):
+    use_template(harness, "{{#bogus}}\nx\n{{/bogus}}\n")
+    proc, calls = harness.run("101", issues={"101": OPEN}, orca_up=True, host_env=IN_ORCA)
+    assert proc.returncode == 1
+    assert launched_nothing(calls)
