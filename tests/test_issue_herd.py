@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -304,6 +305,36 @@ def test_effort_is_never_exported_into_the_pane(harness):
     typed = [c[4] for c in calls if c[:3] == ["herdr", "pane", "run"]]
     assert typed
     assert not any("CLAUDE_CODE_EFFORT_LEVEL" in cmd for cmd in typed)
+
+
+def test_the_pane_ready_marker_matches_only_once_the_shell_runs_it(harness):
+    # The stub accepts any wait-output, but real Herdr would wait out its
+    # timeout if the printed marker and --match ever drifted apart.
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    names = [c[:3] for c in calls]
+    wait = names.index(["herdr", "pane", "wait-output"])
+    match = calls[wait][calls[wait].index("--match") + 1]
+    typed = next(
+        c[4] for c in reversed(calls[:wait]) if c[:3] == ["herdr", "pane", "run"]
+    )
+    shell = subprocess.run(
+        ["bash", "-c", typed],
+        cwd=harness.repo,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert shell.returncode == 0, shell.stdout + shell.stderr
+    assert match in shell.stdout
+    assert match not in typed
+
+
+def test_the_issue_skill_runs_the_launcher_script():
+    skill = (PLUGIN_ROOT / "skills" / "issue" / "SKILL.md").read_text()
+    names = re.findall(r'\$\{CLAUDE_PLUGIN_ROOT\}/scripts/([^"\s]+)', skill)
+    assert names == [SCRIPT.name]
+    assert os.access(SCRIPT, os.X_OK)
 
 
 @pytest.mark.parametrize(
