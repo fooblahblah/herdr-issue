@@ -1091,7 +1091,7 @@ def test_orca_follows_the_configured_model_and_flags(harness):
 )
 def test_orca_refuses_an_issue_that_already_has_a_worktree(harness, branch):
     worktrees = [{"branch": branch, "path": "/wt/existing", "displayName": "#102 Old"}]
-    # Git lists the same worktree; Orca's entry, with its workspace, is the one used.
+    # Git lists the same worktree; Orca's entry, with its workspace, is the one shown.
     git_worktrees = [
         {"path": str(harness.repo), "branch": "refs/heads/main"},
         {"path": "/wt/existing", "branch": "refs/heads/" + branch.removeprefix("refs/heads/")},
@@ -1120,6 +1120,7 @@ def test_a_worktree_only_git_lists_still_holds_its_issue(harness, backend, host_
     # is known only to git.
     git_worktrees = [
         {"path": str(harness.repo), "branch": "refs/heads/main"},
+        {"path": "/wt/detached"},
         {"path": "/wt/elsewhere", "branch": "refs/heads/issue/102-made-elsewhere"},
     ]
     proc, calls = harness.run(
@@ -1192,15 +1193,17 @@ def test_orca_refuses_plain_only_while_superpowers_is_enabled(harness):
     assert proc.returncode == 1
     assert "--plain is not available in Orca while a Superpowers plugin is enabled" in proc.stderr
     assert launched_nothing(calls)
-    # Without the plugin, plain needs no settings and launches.
-    harness.enable_plugins({})
-    harness.log.unlink()
-    proc, calls = harness.run(
-        "102", "--plain", issues={"102": OPEN}, orca_up=True, host_env=IN_ORCA
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "Mode:      plain\n" in proc.stdout
-    assert orca_create(calls)
+    # Without the plugin, or with it listed as disabled, plain needs no
+    # settings and launches.
+    for plugins in ({}, {SUPERPOWERS: False}):
+        harness.enable_plugins(plugins)
+        harness.log.unlink()
+        proc, calls = harness.run(
+            "102", "--plain", issues={"102": OPEN}, orca_up=True, host_env=IN_ORCA
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "Mode:      plain\n" in proc.stdout
+        assert orca_create(calls)
 
 
 def test_orca_runs_superpowers_when_the_plugin_is_enabled(harness):

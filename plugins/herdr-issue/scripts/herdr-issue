@@ -318,11 +318,9 @@ case "$backend" in
 esac
 
 # A host lists only the worktrees it knows (Orca leaves out those made in
-# Herdr), so add git's others: any worktree on an issue's branch holds it.
-worktrees="$(
-    jq -c -n --argjson host "$worktrees" --argjson git "$git_worktrees" \
-        '$host + [$git[] | select(.path as $p | all($host[]; .path != $p))]'
-)"
+# Herdr), so add git's: any worktree on an issue's branch holds it. The
+# host's come first, so a worktree both list is shown with its workspace.
+worktrees="$(jq -c -n --argjson host "$worktrees" --argjson git "$git_worktrees" '$host + $git')"
 titles=()
 urls=()
 failed=""
@@ -448,13 +446,18 @@ fi
 # The modes that run without Superpowers need a per-session --settings file
 # (written further down). Herdr passes Claude's command line through; Orca
 # starts Claude itself and takes only a model and an effort, so under Orca
-# those modes are refused before anything is created.
+# those modes are refused before anything is created. A plain session there
+# needs the file only while a Superpowers plugin is enabled: one that is
+# merely listed, as disabled, stays off without it.
 needs_settings=""
 if [[ "$mode" == ultracode ]] ||
     [[ "$mode" == plain && "$superpowers_plugins" != "{}" ]]; then
     needs_settings=1
 fi
-if [[ "$backend" == orca && -n "$needs_settings" ]]; then
+if [[ "$backend" == orca ]] &&
+    { [[ "$mode" == ultracode ]] ||
+        { [[ "$mode" == plain ]] &&
+            jq -e 'any(.[]; . == true)' <<<"$superpowers_plugins" >/dev/null; }; }; then
     if [[ "$mode" == ultracode ]]; then
         echo "--ultracode is not available in Orca: Orca starts Claude without" \
             "the per-session settings that turn ultracode on." >&2
