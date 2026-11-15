@@ -1,8 +1,9 @@
 # herdr-issue
 
-A Claude Code plugin that launches GitHub issues autonomously in a Herdr
-worktree and Claude Code session. Several issues named together are fixed
-together, in one worktree, session and PR.
+A Claude Code plugin that launches GitHub issues autonomously in a worktree
+and Claude Code session of [Herdr](https://github.com/fooblahblah/herdr) or
+[Orca](https://orca.dev). Several issues named together are fixed together, in
+one worktree, session and PR.
 
 ```
 /herdr-issue:issue 123
@@ -10,16 +11,39 @@ together, in one worktree, session and PR.
 /herdr-issue:issue #123, #124, #125
 /herdr-issue:issue 123 --plain
 /herdr-issue:issue 123 --ultracode
+/herdr-issue:issue 123 --backend orca
 ```
 
 The issues get one worktree, branched from the remote default branch, with an
 `agent` tab running Claude Code and a spare `shell` tab. One issue gets the
 branch `issue/<N>-<slug>`; several get `issue/<N>_<N>...-<slug>`, the slug
-taken from the first issue's title. The agent name keeps as many leading
-numbers as fit Herdr's 32-character limit. The session is given the prompt in
+taken from the first issue's title. The session is given the prompt in
 `plugins/herdr-issue/prompts/autonomous-issue.md` and every issue is assigned
 to you. If any issue already has a worktree, alone or with others, or is not
 open, nothing is launched and every problem is reported.
+
+## Hosts
+
+The worktree and session live in Herdr or in Orca. A launch from a Herdr pane
+goes to Herdr and one from an Orca terminal goes to Orca (they export
+`HERDR_PANE_ID` and `ORCA_TERMINAL_HANDLE`). From any other terminal, whichever
+host is running is used; when both are, `--backend herdr` or `--backend orca`
+decides, and the flag overrides the detection anywhere. The launch summary
+names the host.
+
+In Herdr the agent is named `issue-<N>[_<N>...]`, keeping as many leading
+numbers as fit Herdr's 32-character limit, and the plugin labels the sidebar
+as described below.
+
+In Orca the repository must already be added to Orca. The worktree is created
+with `orca worktree create`, named `#<N> <title>`, with the issues linked to
+it, so the workspace card shows them and, once the session opens one, the PR.
+Claude runs in a terminal tab whatever the Chat | CLI setting, with the
+permission mode Orca's agent settings give it. Orca starts Claude itself and
+accepts only a model and an effort for it, so the two modes that need a
+per-session settings file are refused there: `--ultracode` always, and
+`--plain` while a Superpowers plugin is enabled. Everything else, the prompt,
+the models config, `pr-land` and the final review, is the same.
 
 The session takes the PR through to merge on its own, with one exception
 for scope. It fixes what belongs with the change and opens an issue unasked
@@ -35,13 +59,14 @@ reproduce, the app would not run, or a criterion needs a person's judgment),
 the session marks the PR ready, says what it could and could not verify,
 gives steps for you to check the rest, and merges only once you approve.
 
-The line under the workspace in Herdr's sidebar shows `Issue: #123` in place
-of the agent name (`Issues: #123, #124` for several), and once the session
-opens its PR, `Issue: #123 · PR #456`. The plugin's `PostToolUse` hook adds the
-PR after any `gh pr` command on an `issue/` branch in a Herdr pane, so it also
-puts the label back after a Herdr restart; it leaves other sessions alone. Only the displayed name changes; the agent keeps its name.
-To set it by hand from the session's pane, run
-`plugins/herdr-issue/scripts/show-pr [<PR>]`.
+In Herdr, the line under the workspace in the sidebar shows `Issue: #123` in
+place of the agent name (`Issues: #123, #124` for several), and once the
+session opens its PR, `Issue: #123 · PR #456`. The plugin's `PostToolUse` hook
+adds the PR after any `gh pr` command on an `issue/` branch in a Herdr pane, so
+it also puts the label back after a Herdr restart; it leaves other sessions
+alone, Orca's included, where the workspace card shows the PR by itself. Only
+the displayed name changes; the agent keeps its name. To set it by hand from
+the session's pane, run `plugins/herdr-issue/scripts/show-pr [<PR>]`.
 
 The session reproduces the problem before fixing it, but a reproduction is
 not automatically a permanent test. Before the PR is ready it keeps a test
@@ -152,8 +177,8 @@ session's model and effort.
 
 ## Requirements
 
-`herdr` (server running), `gh` (authenticated), `git`, `jq`, and a GitHub
-`origin` remote.
+`herdr` (server running) or `orca` (app running, with the repository added to
+it), `gh` (authenticated), `git`, `jq`, and a GitHub `origin` remote.
 
 ## Install
 
@@ -194,8 +219,8 @@ issues when `{{ISSUE_URL}}` would reach the prompt; keep it inside a
 python -m pytest tests
 ```
 
-The tests drive the real launcher and `pr-land` with stub `git`, `gh` and
-`herdr` on `PATH`; they need `git`, `jq` and `pytest`.
+The tests drive the real launcher and `pr-land` with stub `git`, `gh`, `herdr`
+and `orca` on `PATH`; they need `git`, `jq` and `pytest`.
 
 ## License
 
