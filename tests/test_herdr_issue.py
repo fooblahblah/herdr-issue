@@ -42,6 +42,16 @@ if tool == "git":
         print(os.environ["STUB_REPO"])
     elif args[-1] == "--git-common-dir":
         print(os.path.join(os.environ["STUB_REPO"], ".git"))
+    elif args[-3:] == ["worktree", "list", "--porcelain"]:
+        # By default only the main checkout, on main.
+        worktrees = json.loads(os.environ.get("STUB_GIT_WORKTREES") or "null") or [
+            {"path": os.environ["STUB_REPO"], "branch": "refs/heads/main"}
+        ]
+        for wt in worktrees:
+            print(f"worktree {wt['path']}")
+            print("HEAD 0123456789abcdef0123456789abcdef01234567")
+            print(f"branch {wt['branch']}" if "branch" in wt else "detached")
+            print()
     elif args[-1] == "refs/remotes/origin/HEAD":
         head = os.environ.get("STUB_ORIGIN_HEAD")
         if not head:
@@ -129,6 +139,7 @@ class Harness:
         issues: dict,
         origin_head: str = "",
         worktrees: list | None = None,
+        git_worktrees: list | None = None,
         herdr_up: bool = True,
         orca_up: bool = False,
         orca_repo_known: bool = True,
@@ -149,6 +160,7 @@ class Harness:
             "STUB_ISSUES": json.dumps(issues),
             "STUB_ORIGIN_HEAD": origin_head,
             "STUB_WORKTREES": json.dumps(worktrees or []),
+            "STUB_GIT_WORKTREES": json.dumps(git_worktrees),
             "STUB_HERDR_UP": "1" if herdr_up else "0",
             "STUB_ORCA_UP": "1" if orca_up else "0",
             "STUB_ORCA_REPO_UNKNOWN": "0" if orca_repo_known else "1",
@@ -1079,8 +1091,18 @@ def test_orca_follows_the_configured_model_and_flags(harness):
 )
 def test_orca_refuses_an_issue_that_already_has_a_worktree(harness, branch):
     worktrees = [{"branch": branch, "path": "/wt/existing", "displayName": "#102 Old"}]
+    # Git lists the same worktree; Orca's entry, with its workspace, is the one used.
+    git_worktrees = [
+        {"path": str(harness.repo), "branch": "refs/heads/main"},
+        {"path": "/wt/existing", "branch": "refs/heads/" + branch.removeprefix("refs/heads/")},
+    ]
     proc, calls = harness.run(
-        "102", issues={"102": OPEN}, worktrees=worktrees, orca_up=True, host_env=IN_ORCA
+        "102",
+        issues={"102": OPEN},
+        worktrees=worktrees,
+        git_worktrees=git_worktrees,
+        orca_up=True,
+        host_env=IN_ORCA,
     )
     assert proc.returncode == 1
     assert "Issue #102 already has a worktree." in proc.stderr
@@ -1088,6 +1110,45 @@ def test_orca_refuses_an_issue_that_already_has_a_worktree(harness, branch):
     assert "Agent:" not in proc.stderr
     assert "Switch to workspace #102 Old in Orca to see it." in proc.stderr
     assert launched_nothing(calls)
+
+
+@pytest.mark.parametrize(
+    ("backend", "host_env"), [("Herdr", IN_HERDR), ("Orca", IN_ORCA)]
+)
+def test_a_worktree_only_git_lists_still_holds_its_issue(harness, backend, host_env):
+    # Orca lists only the worktrees it made, so one made in Herdr (or by hand)
+    # is known only to git.
+    git_worktrees = [
+        {"path": str(harness.repo), "branch": "refs/heads/main"},
+        {"path": "/wt/elsewhere", "branch": "refs/heads/issue/102-made-elsewhere"},
+    ]
+    proc, calls = harness.run(
+        "102",
+        issues={"102": OPEN},
+        git_worktrees=git_worktrees,
+        orca_up=True,
+        host_env=host_env,
+    )
+    assert proc.returncode == 1
+    assert "Issue #102 already has a worktree." in proc.stderr
+    assert f"Workspace: (not open in {backend})" in proc.stderr
+    assert "Worktree:  /wt/elsewhere" in proc.stderr
+    assert launched_nothing(calls)
+
+
+def test_orca_names_the_repository_by_its_main_checkout(harness):
+    # Launched from a linked worktree, whose path Orca does not know.
+    git_worktrees = [
+        {"path": "/src/main-checkout", "branch": "refs/heads/main"},
+        {"path": str(harness.repo), "branch": "refs/heads/some-feature"},
+    ]
+    proc, calls = harness.run(
+        "101", issues={"101": OPEN}, git_worktrees=git_worktrees, orca_up=True, host_env=IN_ORCA
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    listed = next(c for c in calls if c[:3] == ["orca", "worktree", "list"])
+    assert flag(listed, "--repo") == "path:/src/main-checkout"
+    assert flag(orca_create(calls), "--repo") == "path:/src/main-checkout"
 
 
 def test_orca_other_branches_do_not_hold_the_issue(harness):

@@ -277,6 +277,21 @@ esac
 # Check every issue before creating anything, and report every problem: the
 # issues share one session, so one that cannot launch holds back the rest.
 #
+# Git's own list of the repository's worktrees, in the same shape as the
+# host's below. Its first entry is the main checkout, which is how Orca knows
+# the repository even when the launch runs inside a linked worktree.
+git_worktrees="$(
+    git -C "$repo" worktree list --porcelain |
+        jq -R -s -c '[split("\n\n")[] | split("\n")
+            | select(any(.[]; startswith("worktree ")))
+            | {branch: ((first(.[] | select(startswith("branch "))) // "")
+                        | ltrimstr("branch ") | ltrimstr("refs/heads/")),
+               path: (first(.[] | select(startswith("worktree "))) | ltrimstr("worktree ")),
+               workspace: ""}]'
+)"
+main_checkout="$(jq -r '.[0].path // empty' <<<"$git_worktrees")"
+main_checkout="${main_checkout:-$repo}"
+
 # The host's worktrees as one list of {branch, path, workspace}, the branch
 # without any refs/heads/ prefix and the workspace as the host shows it.
 case "$backend" in
@@ -288,9 +303,10 @@ case "$backend" in
         )"
         ;;
     orca)
-        # Orca lists only the repositories it has been given.
-        if ! worktrees="$(orca worktree list --repo "path:${repo}" --json 2>/dev/null)"; then
-            echo "Orca does not know the repository at ${repo}. Add it in Orca first." >&2
+        # Orca lists only the repositories it has been given, by their main
+        # checkout.
+        if ! worktrees="$(orca worktree list --repo "path:${main_checkout}" --json 2>/dev/null)"; then
+            echo "Orca does not know the repository at ${main_checkout}. Add it in Orca first." >&2
             exit 1
         fi
         worktrees="$(
@@ -300,6 +316,13 @@ case "$backend" in
         )"
         ;;
 esac
+
+# A host lists only the worktrees it knows (Orca leaves out those made in
+# Herdr), so add git's others: any worktree on an issue's branch holds it.
+worktrees="$(
+    jq -c -n --argjson host "$worktrees" --argjson git "$git_worktrees" \
+        '$host + [$git[] | select(.path as $p | all($host[]; .path != $p))]'
+)"
 titles=()
 urls=()
 failed=""
@@ -676,7 +699,7 @@ launch_orca() {
     # it is not recorded as that workspace's child. Claude runs in a terminal
     # whatever the Chat | CLI setting, as it does in Herdr.
     create_args=(
-        --repo "path:${repo}"
+        --repo "path:${main_checkout}"
         --name "$label"
         --branch "$branch"
         --base-branch "origin/${base}"
