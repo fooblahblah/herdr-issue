@@ -1,7 +1,7 @@
 # herdr-issue
 
 A Claude Code plugin that launches GitHub issues autonomously in a worktree
-and Claude Code session of [Herdr](https://github.com/fooblahblah/herdr) or
+and Claude Code session of [Herdr](https://herdr.dev) or
 [Orca](https://orca.dev). Several issues named together are fixed together, in
 one worktree, session and PR.
 
@@ -14,8 +14,8 @@ one worktree, session and PR.
 /herdr-issue:issue 123 --backend orca
 ```
 
-The issues get one worktree, branched from the remote default branch, with an
-`agent` tab running Claude Code and a spare `shell` tab. One issue gets the
+The issues get one worktree, branched from the remote default branch, with a
+tab running Claude Code (named `agent` in Herdr) and a spare `shell` tab. One issue gets the
 branch `issue/<N>-<slug>`; several get `issue/<N>_<N>...-<slug>`, the slug
 taken from the first issue's title. The session is given the prompt in
 `plugins/herdr-issue/prompts/autonomous-issue.md` and every issue is assigned
@@ -42,8 +42,18 @@ Claude runs in a terminal tab whatever the Chat | CLI setting, with the
 permission mode Orca's agent settings give it. Orca starts Claude itself and
 accepts only a model and an effort for it, so the two modes that need a
 per-session settings file are refused there: `--ultracode` always, and
-`--plain` while a Superpowers plugin is enabled. Everything else, the prompt,
-the models config, `pr-land` and the final review, is the same.
+`--plain` while a Superpowers plugin is enabled. Since the new worktree has no
+`.claude/settings.local.json`, only the user and project settings count
+towards Superpowers there. Orca offers no effort for Haiku, so a Haiku session
+starts without one. If an issue's branch name is taken, Orca adds a numeric
+suffix and the launch summary names the branch Orca made. Everything else,
+the prompt, the models config, `pr-land` and the final review, is the same.
+
+Either host's launch refuses an issue that has a worktree made by the other
+host, or by hand, since git lists every worktree. Orca's command-line tool is
+looked for on `PATH` and then in Orca's shim at
+`~/.config/orca/linux-orca-cli-shim/orca`, which is not on `PATH` in a Herdr
+pane.
 
 The session takes the PR through to merge on its own, with one exception
 for scope. It fixes what belongs with the change and opens an issue unasked

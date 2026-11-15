@@ -227,6 +227,12 @@ tier_name() {
 # so a launch from inside either host goes to that host. From any other
 # terminal, the host that is running is used, and --backend settles it when
 # both or neither are.
+# On Linux, Orca's CLI is a shim in its config directory, which is not always
+# on PATH (it is not in a Herdr pane), so look there too.
+orca_shim_dir="${XDG_CONFIG_HOME:-$HOME/.config}/orca/linux-orca-cli-shim"
+if ! command -v orca >/dev/null && [[ -x "${orca_shim_dir}/orca" ]]; then
+    PATH="${orca_shim_dir}:${PATH}"
+fi
 herdr_up() { command -v herdr >/dev/null && herdr status server >/dev/null 2>&1; }
 orca_up() {
     command -v orca >/dev/null &&
@@ -266,6 +272,11 @@ case "$backend" in
         host_name=Herdr
         ;;
     orca)
+        if ! command -v orca >/dev/null; then
+            echo "The orca command was not found on PATH or in ${orca_shim_dir}." \
+                "Put Orca's command-line tool on PATH." >&2
+            exit 1
+        fi
         if ! orca_up; then
             echo "Orca is not running. Start Orca first." >&2
             exit 1
@@ -287,7 +298,7 @@ git_worktrees="$(
             | {branch: ((first(.[] | select(startswith("branch "))) // "")
                         | ltrimstr("branch ") | ltrimstr("refs/heads/")),
                path: (first(.[] | select(startswith("worktree "))) | ltrimstr("worktree ")),
-               workspace: ""}]'
+               workspace: "", own: false}]'
 )"
 main_checkout="$(jq -r '.[0].path // empty' <<<"$git_worktrees")"
 main_checkout="${main_checkout:-$repo}"
@@ -299,27 +310,37 @@ case "$backend" in
         worktrees="$(
             herdr worktree list --cwd "$repo" |
                 jq -c '[.result.worktrees[]
-                    | {branch: (.branch // ""), path, workspace: (.open_workspace_id // "")}]'
+                    | {branch: (.branch // ""), path, workspace: (.open_workspace_id // ""),
+                       own: true}]'
         )"
         ;;
     orca)
         # Orca lists only the repositories it has been given, by their main
         # checkout.
-        if ! worktrees="$(orca worktree list --repo "path:${main_checkout}" --json 2>/dev/null)"; then
-            echo "Orca does not know the repository at ${main_checkout}. Add it in Orca first." >&2
+        if ! worktrees="$(orca worktree list --repo "path:${main_checkout}" --json 2>&1)"; then
+            if [[ "$worktrees" == *repo_not_found* ]]; then
+                echo "Orca does not know the repository at ${main_checkout}. Add it in Orca first." >&2
+            else
+                echo "Orca could not list the repository's worktrees:" >&2
+                echo "$worktrees" >&2
+            fi
             exit 1
         fi
-        worktrees="$(
+        if ! worktrees="$(
             jq -c '[.result.worktrees[]
                 | {branch: ((.branch // "") | ltrimstr("refs/heads/")), path,
-                   workspace: (.displayName // "")}]' <<<"$worktrees"
-        )"
+                   workspace: (.displayName // ""), own: true}]' <<<"$worktrees" 2>/dev/null
+        )"; then
+            echo "Orca's worktree list was not the JSON expected." >&2
+            exit 1
+        fi
         ;;
 esac
 
 # A host lists only the worktrees it knows (Orca leaves out those made in
-# Herdr), so add git's: any worktree on an issue's branch holds it. The
-# host's come first, so a worktree both list is shown with its workspace.
+# Herdr, and Herdr those made in Orca), so add git's: any worktree on an
+# issue's branch holds it. The host's come first, so a worktree both list is
+# shown as the host's, with its workspace.
 worktrees="$(jq -c -n --argjson host "$worktrees" --argjson git "$git_worktrees" '$host + $git')"
 titles=()
 urls=()
@@ -345,8 +366,9 @@ for n in "${issues[@]}"; do
         wt_branch="$(jq -r '.branch' <<<"$existing")"
         wt_path="$(jq -r '.path' <<<"$existing")"
         wt_workspace="$(jq -r '.workspace' <<<"$existing")"
+        wt_own="$(jq -r '.own' <<<"$existing")"
 
-        if [[ "$backend" == herdr ]]; then
+        if [[ "$backend" == herdr && "$wt_own" == true ]]; then
             wt_agent="$(agent_name_for "$(jq -r '.ids' <<<"$existing")")"
             agent_status="$(
                 herdr agent list |
@@ -365,7 +387,11 @@ for n in "${issues[@]}"; do
                 echo "Issue #${n} already has a worktree. No new session was started."
             fi
             echo
-            echo "Workspace: ${wt_workspace:-(not open in ${host_name})}"
+            if [[ "$wt_own" == true ]]; then
+                echo "Workspace: ${wt_workspace:-(not open in ${host_name})}"
+            else
+                echo "Workspace: (not made in ${host_name})"
+            fi
             if [[ -n "$wt_agent" ]]; then
                 echo "Agent:     ${wt_agent} (${agent_status:-not running})"
             fi
@@ -374,6 +400,8 @@ for n in "${issues[@]}"; do
             echo
             if [[ -n "$wt_workspace" ]]; then
                 echo "Switch to workspace ${wt_workspace} in ${host_name} to see it."
+            elif [[ "$wt_own" != true ]]; then
+                echo "It was made outside ${host_name}; see it where it was made."
             elif [[ "$backend" == herdr ]]; then
                 echo "Reopen it with: herdr worktree open --cwd \"${repo}\" --path \"${wt_path}\""
             fi
@@ -417,9 +445,15 @@ numbers="${numbers% }"
 # Every superpowers* plugin named in the user, project and local settings, and
 # whether any is enabled once those files are merged (later files win).
 settings_sources=()
+# The local settings file is gitignored, so a new worktree has none; Herdr's
+# per-session settings file decides the plugins there anyway, but an Orca
+# session gets only the user and project files, so only they count for it.
 for f in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" \
     "$repo/.claude/settings.json" \
     "$repo/.claude/settings.local.json"; do
+    if [[ "$backend" == orca && "$f" == */settings.local.json ]]; then
+        continue
+    fi
     if [[ -f "$f" ]]; then
         settings_sources+=("$f")
     fi
@@ -444,14 +478,15 @@ if [[ -z "$mode" ]]; then
 fi
 
 # The modes that run without Superpowers need a per-session --settings file
-# (written further down). Herdr passes Claude's command line through; Orca
-# starts Claude itself and takes only a model and an effort, so under Orca
-# those modes are refused before anything is created. A plain session there
-# needs the file only while a Superpowers plugin is enabled: one that is
-# merely listed, as disabled, stays off without it.
+# (written further down) in Herdr, which passes Claude's command line
+# through. Orca starts Claude itself and takes only a model and an effort, so
+# there those modes are refused before anything is created: ultracode always,
+# and plain only while a Superpowers plugin is enabled, since one merely
+# listed as disabled stays off without the file.
 needs_settings=""
-if [[ "$mode" == ultracode ]] ||
-    [[ "$mode" == plain && "$superpowers_plugins" != "{}" ]]; then
+if [[ "$backend" == herdr ]] &&
+    { [[ "$mode" == ultracode ]] ||
+        [[ "$mode" == plain && "$superpowers_plugins" != "{}" ]]; }; then
     needs_settings=1
 fi
 if [[ "$backend" == orca ]] &&
@@ -715,20 +750,34 @@ launch_orca() {
         --agent claude
         --surface terminal
         --model "$session_model"
-        --effort "$session_effort"
+    )
+    # Orca offers no effort for Haiku and refuses one.
+    if [[ -n "$orca_effort" ]]; then
+        create_args+=(--effort "$orca_effort")
+    fi
+    create_args+=(
         --prompt "$prompt"
         --json
     )
-    if ! created="$(orca worktree create "${create_args[@]}" 2>&1)"; then
+    # Orca's warnings go to stderr, straight to the terminal, so they never
+    # spoil the JSON on stdout.
+    if ! created="$(orca worktree create "${create_args[@]}")"; then
         echo "Orca could not create the worktree:" >&2
         echo "$created" >&2
         exit 1
     fi
 
-    worktree_id="$(jq -r '.result.worktree.id // .result.id // empty' <<<"$created")"
-    worktree_path="$(jq -r '.result.worktree.path // .result.path // empty' <<<"$created")"
-    workspace_id="$(jq -r '.result.worktree.displayName // empty' <<<"$created")"
+    # Claude is running from here, so a reply that cannot be read falls back
+    # on what the launcher asked for rather than stopping.
+    orca_result() { jq -r "$1 // empty" <<<"$created" 2>/dev/null || true; }
+    worktree_id="$(orca_result '.result.worktree.id // .result.id // .result.launch.worktreeId')"
+    worktree_path="$(orca_result '.result.worktree.path // .result.path')"
+    workspace_id="$(orca_result '.result.worktree.displayName')"
     workspace_id="${workspace_id:-$label}"
+    # Orca adds a numeric suffix to a branch name that is taken.
+    created_branch="$(orca_result '.result.worktree.branch')"
+    created_branch="${created_branch#refs/heads/}"
+    branch="${created_branch:-$branch}"
     if [[ -n "$worktree_id" ]]; then
         selector="id:${worktree_id}"
     elif [[ -n "$worktree_path" ]]; then
@@ -743,6 +792,15 @@ launch_orca() {
         echo "Warning: could not open a shell tab in the new workspace." >&2
     fi
 }
+
+orca_effort="$session_effort"
+if [[ "$backend" == orca && "$session_model" == *haiku* ]]; then
+    orca_effort=""
+fi
+model_line="${session_model} (${session_effort} effort)"
+if [[ "$backend" == orca && -z "$orca_effort" ]]; then
+    model_line="${session_model}"
+fi
 
 "launch_${backend}"
 
@@ -762,7 +820,7 @@ Workspace: ${workspace_id}
 ${agent_name:+Agent:     ${agent_name}
 }Branch:    ${branch}
 Mode:      ${mode}${mode_note}
-Model:     ${session_model} (${session_effort} effort)
+Model:     ${model_line}
 $(printf 'Issue:     %s\n' "${urls[@]}")
 
 The Claude session is running independently in ${host_name}.
