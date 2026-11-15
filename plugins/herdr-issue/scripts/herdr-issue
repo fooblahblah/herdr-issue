@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
     echo "usage: herdr-issue <issue-number>... [--plain | --ultracode]" \
-        "[--model <model>] [--effort <level>]" >&2
+        "[--model <model>] [--effort <level>] [--backend herdr|orca]" >&2
     echo "Issue numbers may be separated by spaces or commas, and may start with #." >&2
     exit 2
 }
@@ -13,10 +13,12 @@ usage() {
 # prompt's own workflow and --ultracode turns the session into ultracode; both
 # switch the Superpowers plugin off for the session. --model and --effort
 # override the configured model and effort of this session (see
-# config/defaults.json).
+# config/defaults.json). --backend names the host that gets the worktree and
+# session, Herdr or Orca, when the detection further down should not decide.
 mode=""
 model_flag=""
 effort_flag=""
+backend=""
 issues=()
 
 # The /issue skill passes all of its arguments as one string, so split every
@@ -35,7 +37,7 @@ for ((i = 0; i < ${#words[@]}; i++)); do
             [[ -z "$mode" || "$mode" == "${token#--}" ]] || usage
             mode="${token#--}"
             ;;
-        --model | --effort | --model=* | --effort=*)
+        --model | --effort | --backend | --model=* | --effort=* | --backend=*)
             if [[ "$token" == *=* ]]; then
                 value="${token#*=}"
                 token="${token%%=*}"
@@ -44,11 +46,14 @@ for ((i = 0; i < ${#words[@]}; i++)); do
                 value="${words[i]:-}"
             fi
             [[ -n "$value" && "$value" != --* ]] || usage
-            if [[ "$token" == --model ]]; then
-                model_flag="$value"
-            else
-                effort_flag="$value"
-            fi
+            case "$token" in
+                --model) model_flag="$value" ;;
+                --effort) effort_flag="$value" ;;
+                --backend)
+                    [[ "$value" == herdr || "$value" == orca ]] || usage
+                    backend="$value"
+                    ;;
+            esac
             ;;
         *)
             # Accept GitHub's #123 form, as in "#123, #125, #111".
@@ -217,15 +222,84 @@ tier_name() {
     echo "$(model_name "$1")${2:+ at $2 effort}"
 }
 
-# Make sure Herdr is available/running.
-if ! herdr status server >/dev/null 2>&1; then
-    echo "Herdr server is not running. Start Herdr first." >&2
-    exit 1
+# The host that gets the worktree and the Claude session: Herdr or Orca. A
+# Herdr pane exports HERDR_PANE_ID and an Orca terminal ORCA_TERMINAL_HANDLE,
+# so a launch from inside either host goes to that host. From any other
+# terminal, the host that is running is used, and --backend settles it when
+# both or neither are.
+herdr_up() { command -v herdr >/dev/null && herdr status server >/dev/null 2>&1; }
+orca_up() {
+    command -v orca >/dev/null &&
+        orca status --json 2>/dev/null | jq -e '.ok and .result.runtime.reachable' >/dev/null 2>&1
+}
+
+if [[ -z "$backend" ]]; then
+    if [[ -n "${HERDR_PANE_ID:-}" ]]; then
+        backend=herdr
+    elif [[ -n "${ORCA_TERMINAL_HANDLE:-}" ]]; then
+        backend=orca
+    else
+        herdr_running=""
+        orca_running=""
+        if herdr_up; then herdr_running=1; fi
+        if orca_up; then orca_running=1; fi
+        if [[ -n "$herdr_running" && -n "$orca_running" ]]; then
+            echo "Both Herdr and Orca are running; pass --backend herdr or --backend orca." >&2
+            exit 1
+        elif [[ -n "$herdr_running" ]]; then
+            backend=herdr
+        elif [[ -n "$orca_running" ]]; then
+            backend=orca
+        else
+            echo "Neither Herdr nor Orca is running. Start one first." >&2
+            exit 1
+        fi
+    fi
 fi
+
+case "$backend" in
+    herdr)
+        if ! herdr_up; then
+            echo "Herdr server is not running. Start Herdr first." >&2
+            exit 1
+        fi
+        host_name=Herdr
+        ;;
+    orca)
+        if ! orca_up; then
+            echo "Orca is not running. Start Orca first." >&2
+            exit 1
+        fi
+        host_name=Orca
+        ;;
+esac
 
 # Check every issue before creating anything, and report every problem: the
 # issues share one session, so one that cannot launch holds back the rest.
-worktrees="$(herdr worktree list --cwd "$repo")"
+#
+# The host's worktrees as one list of {branch, path, workspace}, the branch
+# without any refs/heads/ prefix and the workspace as the host shows it.
+case "$backend" in
+    herdr)
+        worktrees="$(
+            herdr worktree list --cwd "$repo" |
+                jq -c '[.result.worktrees[]
+                    | {branch: (.branch // ""), path, workspace: (.open_workspace_id // "")}]'
+        )"
+        ;;
+    orca)
+        # Orca lists only the repositories it has been given.
+        if ! worktrees="$(orca worktree list --repo "path:${repo}" --json 2>/dev/null)"; then
+            echo "Orca does not know the repository at ${repo}. Add it in Orca first." >&2
+            exit 1
+        fi
+        worktrees="$(
+            jq -c '[.result.worktrees[]
+                | {branch: ((.branch // "") | ltrimstr("refs/heads/")), path,
+                   workspace: (.displayName // "")}]' <<<"$worktrees"
+        )"
+        ;;
+esac
 titles=()
 urls=()
 failed=""
@@ -239,7 +313,7 @@ for n in "${issues[@]}"; do
                 (.branch // "")
                 | (capture("^issue/(?<n>[0-9]+(_[0-9]+)*)-") | .n | split("_")) // [];
             first(
-                .result.worktrees[]
+                .[]
                 | select(any(issue_numbers[]; . == $n))
                 | . + {ids: (issue_numbers | join("_"))}
             ) // empty
@@ -249,13 +323,19 @@ for n in "${issues[@]}"; do
     if [[ -n "$existing" ]]; then
         wt_branch="$(jq -r '.branch' <<<"$existing")"
         wt_path="$(jq -r '.path' <<<"$existing")"
-        wt_workspace="$(jq -r '.open_workspace_id // empty' <<<"$existing")"
-        wt_agent="$(agent_name_for "$(jq -r '.ids' <<<"$existing")")"
-        agent_status="$(
-            herdr agent list |
-                jq -r --arg name "$wt_agent" \
-                    'first(.result.agents[] | select(.name == $name) | .agent_status) // empty'
-        )"
+        wt_workspace="$(jq -r '.workspace' <<<"$existing")"
+
+        if [[ "$backend" == herdr ]]; then
+            wt_agent="$(agent_name_for "$(jq -r '.ids' <<<"$existing")")"
+            agent_status="$(
+                herdr agent list |
+                    jq -r --arg name "$wt_agent" \
+                        'first(.result.agents[] | select(.name == $name) | .agent_status) // empty'
+            )"
+        else
+            wt_agent=""
+            agent_status=""
+        fi
 
         {
             if [[ -n "$agent_status" ]]; then
@@ -264,14 +344,16 @@ for n in "${issues[@]}"; do
                 echo "Issue #${n} already has a worktree. No new session was started."
             fi
             echo
-            echo "Workspace: ${wt_workspace:-(not open in Herdr)}"
-            echo "Agent:     ${wt_agent} (${agent_status:-not running})"
+            echo "Workspace: ${wt_workspace:-(not open in ${host_name})}"
+            if [[ -n "$wt_agent" ]]; then
+                echo "Agent:     ${wt_agent} (${agent_status:-not running})"
+            fi
             echo "Branch:    ${wt_branch}"
             echo "Worktree:  ${wt_path}"
             echo
             if [[ -n "$wt_workspace" ]]; then
-                echo "Switch to workspace ${wt_workspace} in Herdr to see it."
-            else
+                echo "Switch to workspace ${wt_workspace} in ${host_name} to see it."
+            elif [[ "$backend" == herdr ]]; then
                 echo "Reopen it with: herdr worktree open --cwd \"${repo}\" --path \"${wt_path}\""
             fi
             echo
@@ -338,6 +420,28 @@ if [[ -z "$mode" ]]; then
         mode=plain
         mode_note=" (Superpowers plugin not enabled)"
     fi
+fi
+
+# The modes that run without Superpowers need a per-session --settings file
+# (written further down). Herdr passes Claude's command line through; Orca
+# starts Claude itself and takes only a model and an effort, so under Orca
+# those modes are refused before anything is created.
+needs_settings=""
+if [[ "$mode" == ultracode ]] ||
+    [[ "$mode" == plain && "$superpowers_plugins" != "{}" ]]; then
+    needs_settings=1
+fi
+if [[ "$backend" == orca && -n "$needs_settings" ]]; then
+    if [[ "$mode" == ultracode ]]; then
+        echo "--ultracode is not available in Orca: Orca starts Claude without" \
+            "the per-session settings that turn ultracode on." >&2
+    else
+        echo "--plain is not available in Orca while a Superpowers plugin is" \
+            "enabled: Orca starts Claude without the per-session settings that" \
+            "switch the plugin off. Launch without --plain, or disable the plugin." >&2
+    fi
+    echo "Nothing was launched." >&2
+    exit 1
 fi
 
 # Build the prompt before creating anything, so a template mistake leaves no
@@ -458,8 +562,7 @@ agent_args=(--model "$session_model" --effort "$session_effort")
 # session while superpowers sessions keep them, and ultracode on where asked.
 # A --settings file outranks user and project settings, and it lives in the
 # repo's git dir, out of git's sight.
-if [[ "$mode" == ultracode ]] ||
-    [[ "$mode" == plain && "$superpowers_plugins" != "{}" ]]; then
+if [[ -n "$needs_settings" ]]; then
     settings_dir="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/herdr-issue"
     mkdir -p "$settings_dir"
     session_settings="${settings_dir}/issue-${ids}.settings.json"
@@ -488,77 +591,134 @@ label="${numbers} ${titles[0]}"
 # The worktree begins from the current remote default branch.
 git -C "$repo" fetch origin "$base"
 
-created="$(
-    herdr worktree create \
-        --cwd "$repo" \
-        --branch "$branch" \
-        --base "origin/${base}" \
-        --label "$label" \
-        --no-focus
-)"
+# Launch in the host. Afterwards workspace_id names the workspace as the host
+# shows it, and agent_name the Herdr agent (Orca names no agent).
+agent_name=""
+launch_herdr() {
+    created="$(
+        herdr worktree create \
+            --cwd "$repo" \
+            --branch "$branch" \
+            --base "origin/${base}" \
+            --label "$label" \
+            --no-focus
+    )"
 
-workspace_id="$(jq -r '.result.workspace.workspace_id' <<<"$created")"
-tab_id="$(jq -r '.result.tab.tab_id' <<<"$created")"
-pane_id="$(jq -r '.result.root_pane.pane_id' <<<"$created")"
+    workspace_id="$(jq -r '.result.workspace.workspace_id' <<<"$created")"
+    tab_id="$(jq -r '.result.tab.tab_id' <<<"$created")"
+    pane_id="$(jq -r '.result.root_pane.pane_id' <<<"$created")"
 
-# Give the initial layout useful names.
-herdr tab rename "$tab_id" agent >/dev/null
+    # Give the initial layout useful names.
+    herdr tab rename "$tab_id" agent >/dev/null
 
-# Handy independent shell in the same worktree.
-herdr tab create \
-    --workspace "$workspace_id" \
-    --label shell \
-    --no-focus >/dev/null
+    # Handy independent shell in the same worktree.
+    herdr tab create \
+        --workspace "$workspace_id" \
+        --label shell \
+        --no-focus >/dev/null
 
-# The pane's shell may still be starting when the agent is started, so wait
-# until the shell has run a command. The printf assembles the marker at run
-# time, so the typed command line itself never matches.
-herdr pane run "$pane_id" "printf '%s-%s\n' herdr-issue ready" >/dev/null
-herdr pane wait-output "$pane_id" \
-    --match "herdr-issue-ready" \
-    --timeout 30000 >/dev/null
+    # The pane's shell may still be starting when the agent is started, so
+    # wait until the shell has run a command. The printf assembles the marker
+    # at run time, so the typed command line itself never matches.
+    herdr pane run "$pane_id" "printf '%s-%s\n' herdr-issue ready" >/dev/null
+    herdr pane wait-output "$pane_id" \
+        --match "herdr-issue-ready" \
+        --timeout 30000 >/dev/null
 
-agent_name="$(agent_name_for "$ids")"
+    agent_name="$(agent_name_for "$ids")"
 
-# The shell can still be redrawing its prompt after the marker prints, and
-# `agent start` refuses a pane that is not at an idle prompt, so retry while
-# Herdr reports the pane busy.
-for attempt in $(seq 1 30); do
-    if start_err="$(
-        herdr agent start "$agent_name" \
-            --kind claude \
-            --pane "$pane_id" \
-            --timeout 120000 \
-            -- \
-            "${agent_args[@]}" 2>&1 >/dev/null
-    )"; then
-        break
+    # The shell can still be redrawing its prompt after the marker prints, and
+    # `agent start` refuses a pane that is not at an idle prompt, so retry
+    # while Herdr reports the pane busy.
+    for attempt in $(seq 1 30); do
+        if start_err="$(
+            herdr agent start "$agent_name" \
+                --kind claude \
+                --pane "$pane_id" \
+                --timeout 120000 \
+                -- \
+                "${agent_args[@]}" 2>&1 >/dev/null
+        )"; then
+            break
+        fi
+        if [[ "$start_err" != *agent_pane_busy* || "$attempt" -eq 30 ]]; then
+            echo "Could not start the agent in pane ${pane_id} (workspace ${workspace_id}):" >&2
+            echo "$start_err" >&2
+            exit 1
+        fi
+        sleep 1
+    done
+
+    # Name the issues on the sidebar line under the workspace, where the agent
+    # name would show; the agent keeps its name. The plugin's hook adds the PR
+    # once there is one (scripts/show-pr). Display only, so a failure just
+    # warns.
+    if [[ -n "$multi" ]]; then
+        sidebar="$(printf ', #%s' "${issues[@]}")"
+        sidebar="Issues: ${sidebar:2}"
+    else
+        sidebar="Issue: #${issues[0]}"
     fi
-    if [[ "$start_err" != *agent_pane_busy* || "$attempt" -eq 30 ]]; then
-        echo "Could not start the agent in pane ${pane_id} (workspace ${workspace_id}):" >&2
-        echo "$start_err" >&2
+    if ! herdr pane report-metadata "$pane_id" \
+        --source herdr-issue \
+        --display-agent "$sidebar" >/dev/null; then
+        echo "Warning: could not name the issue${multi:+s} in Herdr's sidebar." >&2
+    fi
+
+    # Submit and return immediately. Herdr owns the running agent from here.
+    herdr agent prompt "$agent_name" "$prompt" >/dev/null
+}
+
+launch_orca() {
+    # One call creates the worktree, links the issues to it (Orca shows them,
+    # and later the PR, on the workspace card) and starts Claude with the
+    # prompt. The session is independent of the workspace this runs from, so
+    # it is not recorded as that workspace's child. Claude runs in a terminal
+    # whatever the Chat | CLI setting, as it does in Herdr.
+    create_args=(
+        --repo "path:${repo}"
+        --name "$label"
+        --branch "$branch"
+        --base-branch "origin/${base}"
+        --no-parent
+    )
+    for u in "${urls[@]}"; do
+        create_args+=(--reference "$u")
+    done
+    create_args+=(
+        --agent claude
+        --surface terminal
+        --model "$session_model"
+        --effort "$session_effort"
+        --prompt "$prompt"
+        --json
+    )
+    if ! created="$(orca worktree create "${create_args[@]}" 2>&1)"; then
+        echo "Orca could not create the worktree:" >&2
+        echo "$created" >&2
         exit 1
     fi
-    sleep 1
-done
 
-# Name the issues on the sidebar line under the workspace, where the agent
-# name would show; the agent keeps its name. The plugin's hook adds the PR
-# once there is one (scripts/show-pr). Display only, so a failure just warns.
-if [[ -n "$multi" ]]; then
-    sidebar="$(printf ', #%s' "${issues[@]}")"
-    sidebar="Issues: ${sidebar:2}"
-else
-    sidebar="Issue: #${issues[0]}"
-fi
-if ! herdr pane report-metadata "$pane_id" \
-    --source herdr-issue \
-    --display-agent "$sidebar" >/dev/null; then
-    echo "Warning: could not name the issue${multi:+s} in Herdr's sidebar." >&2
-fi
+    worktree_id="$(jq -r '.result.worktree.id // .result.id // empty' <<<"$created")"
+    worktree_path="$(jq -r '.result.worktree.path // .result.path // empty' <<<"$created")"
+    workspace_id="$(jq -r '.result.worktree.displayName // empty' <<<"$created")"
+    workspace_id="${workspace_id:-$label}"
+    if [[ -n "$worktree_id" ]]; then
+        selector="id:${worktree_id}"
+    elif [[ -n "$worktree_path" ]]; then
+        selector="path:${worktree_path}"
+    else
+        selector="branch:${branch}"
+    fi
 
-# Submit and return immediately. Herdr owns the running agent from here.
-herdr agent prompt "$agent_name" "$prompt" >/dev/null
+    # Handy independent shell in the same worktree. Display only, so a
+    # failure just warns.
+    if ! orca terminal create --worktree "$selector" --title shell --json >/dev/null 2>&1; then
+        echo "Warning: could not open a shell tab in the new workspace." >&2
+    fi
+}
+
+"launch_${backend}"
 
 # Mark the issues as being worked on, only once a session is actually running.
 # "@me" resolves to whoever gh is logged in as, so each launcher assigns
@@ -573,11 +733,11 @@ cat <<EOF
 Launched issue${multi:+s} ${numbers}
 
 Workspace: ${workspace_id}
-Agent:     ${agent_name}
-Branch:    ${branch}
+${agent_name:+Agent:     ${agent_name}
+}Branch:    ${branch}
 Mode:      ${mode}${mode_note}
 Model:     ${session_model} (${session_effort} effort)
 $(printf 'Issue:     %s\n' "${urls[@]}")
 
-The Claude session is running independently in Herdr.
+The Claude session is running independently in ${host_name}.
 EOF
