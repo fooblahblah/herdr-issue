@@ -95,6 +95,8 @@ elif tool == "orca":
             sys.exit("Orca is not running")
         print(json.dumps({"ok": True, "result": {"runtime": {"reachable": True}}}))
     elif args[:2] == ["worktree", "list"]:
+        if os.environ.get("STUB_ORCA_WARN") == "1":
+            print("warning: something on the side", file=sys.stderr)
         if os.environ.get("STUB_ORCA_REPO_UNKNOWN") == "1":
             print(json.dumps({"ok": False, "error": {"code": "repo_not_found"}}))
             sys.exit(1)
@@ -168,7 +170,10 @@ class Harness:
             shim.parent.mkdir(parents=True, exist_ok=True)
             if (self.bin / "orca").is_symlink():
                 (self.bin / "orca").rename(shim)
-            path = [d for d in path if not (Path(d) / "orca").exists()]
+            real = [d for d in path[1:] if (Path(d) / "orca").exists()]
+            if any((Path(d) / "jq").exists() for d in real):
+                pytest.skip("a real orca shares a PATH directory with jq")
+            path = [d for d in path if d not in real]
         env.update({
             "PATH": os.pathsep.join(path),
             # Keep the real user settings out of Superpowers detection.

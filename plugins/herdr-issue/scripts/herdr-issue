@@ -317,15 +317,20 @@ case "$backend" in
     orca)
         # Orca lists only the repositories it has been given, by their main
         # checkout.
-        if ! worktrees="$(orca worktree list --repo "path:${main_checkout}" --json 2>&1)"; then
-            if [[ "$worktrees" == *repo_not_found* ]]; then
+        # Its stderr is kept apart, so a warning cannot spoil the JSON.
+        list_err="$(mktemp)"
+        if ! worktrees="$(orca worktree list --repo "path:${main_checkout}" --json 2>"$list_err")"; then
+            list_err_text="$(cat "$list_err")"
+            rm -f "$list_err"
+            if [[ "${worktrees}${list_err_text}" == *repo_not_found* ]]; then
                 echo "Orca does not know the repository at ${main_checkout}. Add it in Orca first." >&2
             else
                 echo "Orca could not list the repository's worktrees:" >&2
-                echo "$worktrees" >&2
+                printf '%s\n' "$worktrees" "$list_err_text" >&2
             fi
             exit 1
         fi
+        rm -f "$list_err"
         if ! worktrees="$(
             jq -c '[.result.worktrees[]
                 | {branch: ((.branch // "") | ltrimstr("refs/heads/")), path,
