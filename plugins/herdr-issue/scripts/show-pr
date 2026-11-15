@@ -4,10 +4,10 @@ set -euo pipefail
 # show-pr names a session's PR in Herdr's sidebar, on the line under the
 # workspace title, as "Issue: #3284 · PR #3301" ("Issues: #3284, #3285 · ..."
 # for several). It is Herdr only: in Orca the workspace card shows the linked
-# PR by itself, and the hook does nothing outside a Herdr pane. It reads the issue numbers from the branch, which keeps every
-# number even where the agent name drops some to fit Herdr. Only the displayed
-# name changes: the agent keeps its real name, so the launcher still finds the
-# session by it.
+# PR by itself, and the hook does nothing outside a Herdr pane. It reads the
+# issue numbers from the branch, which keeps every number even where the agent
+# name drops some to fit Herdr. Only the displayed name changes: the agent
+# keeps its real name, so the launcher still finds the session by it.
 #
 #   show-pr [<pr>]   label the calling Herdr pane; without a number, use the
 #                    current branch's PR

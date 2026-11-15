@@ -1,6 +1,6 @@
 ---
 name: issue
-description: Launch one or more GitHub issues autonomously, together in one isolated worktree, Claude Code session and PR in Herdr or Orca (uses Superpowers when it is enabled; --plain runs without it, --ultracode runs an ultracode session; both Herdr only)
+description: Launch one or more GitHub issues autonomously, together in one isolated worktree, Claude Code session and PR in Herdr or Orca (uses Superpowers when it is enabled; --plain runs without it, --ultracode runs an ultracode session; Orca refuses --ultracode, and --plain while Superpowers is enabled)
 argument-hint: <issue-number>... [--plain | --ultracode] [--model <model>] [--effort <level>] [--backend herdr|orca]
 disable-model-invocation: true
 allowed-tools: Bash
