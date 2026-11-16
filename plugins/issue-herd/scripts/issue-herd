@@ -585,14 +585,8 @@ launch_herdr() {
     tab_id="$(jq -r '.result.tab.tab_id' <<<"$created")"
     pane_id="$(jq -r '.result.root_pane.pane_id' <<<"$created")"
 
-    # Give the initial layout useful names.
+    # Give the initial tab a useful name.
     herdr tab rename "$tab_id" agent >/dev/null
-
-    # Handy independent shell in the same worktree.
-    herdr tab create \
-        --workspace "$workspace_id" \
-        --label shell \
-        --no-focus >/dev/null
 
     # The pane's shell may still be starting when the agent is started, so
     # wait until the shell has run a command. The printf assembles the marker
@@ -686,27 +680,12 @@ launch_orca() {
     # Claude is running from here, so a reply that cannot be read falls back
     # on what the launcher asked for rather than stopping.
     orca_result() { jq -r "$1 // empty" <<<"$created" 2>/dev/null || true; }
-    worktree_id="$(orca_result '.result.worktree.id // .result.id // .result.launch.worktreeId')"
-    worktree_path="$(orca_result '.result.worktree.path // .result.path')"
     workspace_id="$(orca_result '.result.worktree.displayName')"
     workspace_id="${workspace_id:-$label}"
     # Orca adds a numeric suffix to a branch name that is taken.
     created_branch="$(orca_result '.result.worktree.branch')"
     created_branch="${created_branch#refs/heads/}"
     branch="${created_branch:-$branch}"
-    if [[ -n "$worktree_id" ]]; then
-        selector="id:${worktree_id}"
-    elif [[ -n "$worktree_path" ]]; then
-        selector="path:${worktree_path}"
-    else
-        selector="branch:${branch}"
-    fi
-
-    # Handy independent shell in the same worktree. Display only, so a
-    # failure just warns.
-    if ! orca terminal create --worktree "$selector" --title shell --json >/dev/null 2>&1; then
-        echo "Warning: could not open a shell tab in the new workspace." >&2
-    fi
 }
 
 orca_effort="$session_effort"

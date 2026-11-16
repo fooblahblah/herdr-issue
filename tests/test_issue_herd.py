@@ -93,7 +93,7 @@ elif tool == "herdr":
         print(json.dumps({"result": {"agents": agents}}))
     elif args[:2] == ["agent", "prompt"] and os.environ.get("STUB_HERDR_BLOCKED") == "1":
         sys.exit("agent_blocked: the agent is waiting on a permission prompt")
-    # tab rename/create, pane run/wait-output and agent prompt all succeed
+    # tab rename, pane run/wait-output and agent prompt all succeed
     # silently.
 elif tool == "orca":
     if args[:1] == ["status"]:
@@ -122,8 +122,6 @@ elif tool == "orca":
             "id": "r1::/wt/new", "path": "/wt/new", "displayName": name,
             "branch": f"refs/heads/{branch}",
         }}}))
-    elif args[:2] == ["terminal", "create"]:
-        print(json.dumps({"ok": True, "result": {"handle": "term_1"}}))
     elif args[:2] == ["terminal", "list"]:
         # Orca refuses a worktree it does not manage.
         terminals = os.environ.get("STUB_ORCA_TERMINALS")
@@ -259,6 +257,12 @@ def agent_starts(calls: list) -> list:
 
 def agents_started(calls: list) -> list[str]:
     return [c[3] for c in agent_starts(calls)]
+
+
+def test_herdr_opens_only_the_agent_tab(harness):
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert [c[2:] for c in calls if c[:2] == ["herdr", "tab"]] == [["rename", "t1", "agent"]]
 
 
 def test_single_issue_keeps_the_existing_output(harness):
@@ -1063,7 +1067,6 @@ def test_an_orca_terminal_launches_in_orca_even_when_herdr_runs(harness):
         ["status", "--json"],
         ["worktree", "list"],
         ["worktree", "create"],
-        ["terminal", "create"],
     ]
     assert "running independently in Orca." in proc.stdout
 
@@ -1133,9 +1136,7 @@ def test_orca_creates_the_worktree_with_the_agent_and_prompt_in_one_call(harness
     assert flag(create, "--prompt").startswith(f"Let's start working on {URL.format(101)}.\n")
     assert "--no-parent" in create and "--json" in create
     assert "--settings" not in create
-    shell = next(c for c in calls if c[:3] == ["orca", "terminal", "create"])
-    assert flag(shell, "--worktree") == "id:r1::/wt/new"
-    assert flag(shell, "--title") == "shell"
+    assert not any(c[:3] == ["orca", "terminal", "create"] for c in calls)
     assert [c[3] for c in calls if c[:3] == ["gh", "issue", "edit"]] == ["101"]
     assert proc.stdout.startswith("Launched issue #101\n")
     assert "Workspace: #101 Notional issue title\n" in proc.stdout

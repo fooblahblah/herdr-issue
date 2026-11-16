@@ -15,7 +15,7 @@ one worktree, session and PR.
 ```
 
 The issues get one worktree, branched from the remote default branch, with a
-tab running Claude Code (named `agent` in Herdr) and a spare `shell` tab. One issue gets the
+tab running Claude Code (named `agent` in Herdr). One issue gets the
 branch `issue/<N>-<slug>`; several get `issue/<N>_<N>...-<slug>`, the slug
 taken from the first issue's title. The session is given the prompt in
 `plugins/issue-herd/prompts/autonomous-issue.md` and every issue is assigned
