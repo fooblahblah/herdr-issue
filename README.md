@@ -55,6 +55,31 @@ looked for on `PATH` and then in Orca's shim at
 `~/.config/orca/linux-orca-cli-shim/orca`, which is not on `PATH` in a Herdr
 pane.
 
+## Messaging a session
+
+A running session can be given a message as if it were typed at its prompt,
+to steer it, answer it or pass it new information:
+
+```
+/issue-herd:send 123 The fix also needs a changelog entry.
+plugins/issue-herd/scripts/issue-send 123 < notes.md
+```
+
+The first word is the issue number (`#123` works too) and the rest is the
+message; with no text, the script reads the message from stdin. Any issue of
+a shared session reaches that session. The session is found by its issue,
+through the branch of its worktree, in whichever host is running it: in Herdr
+the message goes to the agent `issue-<N>...` through `herdr agent prompt`,
+and in Orca to the Claude terminal of the issue's workspace through
+`orca terminal send`. Either host queues a message behind the session's
+current turn. The reply says where it went and, in Orca, whether the session
+took it up at once or will when its turn ends. Herdr refuses a message while
+the agent waits on a permission prompt. `--backend herdr|orca` before the
+issue number looks in one host only. Nothing is sent when the issue has no
+worktree or no host has a session for it. The launch summary ends with the
+command for the session it launched, so a coordinating session can message
+the ones it starts.
+
 The session takes the PR through to merge on its own, with one exception
 for scope. It fixes what belongs with the change and opens an issue unasked
 only for plainly separate work. When something it finds needs your choice, or
@@ -229,7 +254,7 @@ issues when `{{ISSUE_URL}}` would reach the prompt; keep it inside a
 python -m pytest tests
 ```
 
-The tests drive the real launcher and `pr-land` with stub `git`, `gh`, `herdr`
+The tests drive the real launcher, `issue-send` and `pr-land` with stub `git`, `gh`, `herdr`
 and `orca` on `PATH`; they need `git`, `jq` and `pytest`.
 
 ## License

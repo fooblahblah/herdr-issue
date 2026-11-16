@@ -88,8 +88,13 @@ elif tool == "herdr":
         }}))
     elif args[:2] == ["agent", "start"] and not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", args[2]):
         sys.exit(f"invalid_agent_name: {args[2]}")
-    # tab rename/create, pane run/wait-output and agent list/prompt all
-    # succeed silently.
+    elif args[:2] == ["agent", "list"]:
+        agents = json.loads(os.environ.get("STUB_AGENTS") or "[]")
+        print(json.dumps({"result": {"agents": agents}}))
+    elif args[:2] == ["agent", "prompt"] and os.environ.get("STUB_HERDR_BLOCKED") == "1":
+        sys.exit("agent_blocked: the agent is waiting on a permission prompt")
+    # tab rename/create, pane run/wait-output and agent prompt all succeed
+    # silently.
 elif tool == "orca":
     if args[:1] == ["status"]:
         if os.environ.get("STUB_ORCA_UP") != "1":
@@ -119,6 +124,19 @@ elif tool == "orca":
         }}}))
     elif args[:2] == ["terminal", "create"]:
         print(json.dumps({"ok": True, "result": {"handle": "term_1"}}))
+    elif args[:2] == ["terminal", "list"]:
+        # Orca refuses a worktree it does not manage.
+        terminals = os.environ.get("STUB_ORCA_TERMINALS")
+        if terminals is None:
+            print(json.dumps({"ok": False, "error": {"code": "selector_not_found"}}))
+            sys.exit(1)
+        print(json.dumps({"ok": True, "result": {"terminals": json.loads(terminals)}}))
+    elif args[:2] == ["terminal", "send"]:
+        stages = json.loads(os.environ.get("STUB_ORCA_STAGES") or '["input_accepted", "turn_started"]')
+        print(json.dumps({"ok": True, "result": {"send": {
+            "handle": args[args.index("--terminal") + 1], "accepted": True,
+            "prompt": {"stages": stages},
+        }}}))
     else:
         sys.exit(f"stub orca: unexpected {args}")
 """
@@ -159,6 +177,8 @@ class Harness:
         host_env: dict | None = None,
         orca_on_path: bool = True,
         stub_env: dict | None = None,
+        script: Path = SCRIPT,
+        stdin: str | None = None,
     ) -> tuple[subprocess.CompletedProcess, list]:
         # The tests may themselves run inside a Herdr pane or an Orca
         # terminal; neither host's variables reach the script unless a test
@@ -194,11 +214,15 @@ class Harness:
             **(host_env or {}),
         })
         proc = subprocess.run(
-            [str(SCRIPT), *args],
+            [str(script), *args],
             env=env,
+            input=stdin,
             capture_output=True,
             text=True,
             timeout=60,
+            # With no input, stdin is closed rather than inherited, so a
+            # script that reads it gets nothing instead of waiting.
+            **({} if stdin is not None else {"stdin": subprocess.DEVNULL}),
         )
         calls = []
         if self.log.exists():

@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# issue-send gives a running issue session a message, as if typed at its
+# prompt: a steer, an answer, a change of plan. The session is found by its
+# issue, through the branch of its worktree, in whichever host runs it.
+#
+#   issue-send [--backend herdr|orca] <issue-number> <text>...
+#   issue-send <issue-number> < message.txt
+#
+# The text is everything after the number, so the /issue-herd:send skill can
+# pass it along as one string; with no text, the message is read from stdin.
+# Any issue of a shared session reaches that session.
+#
+# In Herdr the message goes to the agent the launcher named,
+# issue-<N>[_<N>...], through `herdr agent prompt`, which Herdr queues behind
+# the agent's current turn. In Orca it goes to the Claude terminal of the
+# issue's workspace through `orca terminal send`, which pastes it as a prompt;
+# a session busy with a turn takes it up when that turn ends.
+
+usage() {
+    echo "usage: issue-send [--backend herdr|orca] <issue-number> <text>..." >&2
+    echo "       issue-send [--backend herdr|orca] <issue-number> < message" >&2
+    exit 2
+}
+
+# The options come first, then the issue, then the text, so a message may say
+# anything, "--backend" included. The arguments are joined so that a shell
+# call with the text in several words and the skill's single string parse
+# the same way.
+backend=""
+text="$*"
+while :; do
+    text="${text#"${text%%[![:space:]]*}"}"
+    if [[ "$text" =~ ^--backend(=|[[:space:]]+)([^[:space:]]+)(.*)$ ]]; then
+        backend="${BASH_REMATCH[2]}"
+        text="${BASH_REMATCH[3]}"
+        [[ "$backend" == herdr || "$backend" == orca ]] || usage
+    else
+        break
+    fi
+done
+# Accept GitHub's #123 form.
+[[ "$text" =~ ^#?([0-9]+)([[:space:]]+(.*))?$ ]] || usage
+issue=$((10#${BASH_REMATCH[1]}))
+message="${BASH_REMATCH[3]:-}"
+if [[ -z "$message" ]]; then
+    if [[ -t 0 ]]; then
+        usage
+    fi
+    message="$(cat)"
+fi
+# Trailing newlines would submit the message early in a terminal.
+message="${message%"${message##*[![:space:]]}"}"
+if [[ -z "$message" ]]; then
+    echo "The message is empty." >&2
+    exit 2
+fi
+
+repo="$(git rev-parse --show-toplevel)"
+plugin_root="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
+# shellcheck source=lib/hosts.sh
+source "${plugin_root}/scripts/lib/hosts.sh"
+
+# Git lists every worktree, whichever host made it, so the issue's worktree
+# comes from git and only the session is looked for in the hosts.
+list_git_worktrees
+worktree="$(issue_worktree_in "$git_worktrees" "$issue")"
+if [[ -z "$worktree" ]]; then
+    echo "Issue #${issue} has no worktree. Launch it with: /issue-herd:issue ${issue}" >&2
+    exit 1
+fi
+wt_branch="$(jq -r '.branch' <<<"$worktree")"
+wt_path="$(jq -r '.path' <<<"$worktree")"
+agent_name="$(agent_name_for "$(jq -r '.ids' <<<"$worktree")")"
+
+# The session is looked for in each host that is running, or only in the one
+# --backend names. The hosts know nothing of each other's sessions, so the
+# one that has a live session for the worktree gets the message: in Herdr the
+# named agent, in Orca a Claude terminal of the workspace.
+hosts=()
+if [[ -n "$backend" ]]; then
+    hosts=("$backend")
+else
+    if herdr_up; then hosts+=(herdr); fi
+    if orca_up; then hosts+=(orca); fi
+    if [[ ${#hosts[@]} -eq 0 ]]; then
+        echo "Neither Herdr nor Orca is running, so no session can be running." >&2
+        exit 1
+    fi
+fi
+
+# A reason per host the session was not found in, for the final report.
+missing=()
+agent_status=""
+handle=""
+for host in "${hosts[@]}"; do
+    case "$host" in
+        herdr)
+            if ! herdr_up; then
+                missing+=("Herdr is not running")
+                continue
+            fi
+            agent_status="$(
+                herdr agent list 2>/dev/null |
+                    jq -r --arg name "$agent_name" \
+                        'first(.result.agents[]? | select(.name == $name) | .agent_status) // empty'
+            )"
+            if [[ -z "$agent_status" ]]; then
+                missing+=("Herdr has no agent named ${agent_name}")
+                continue
+            fi
+            backend=herdr
+            break
+            ;;
+        orca)
+            if ! orca_up; then
+                missing+=("Orca is not running")
+                continue
+            fi
+            # Orca refuses a worktree it does not manage, which is how a
+            # Herdr worktree looks to it; its stderr is kept apart so a
+            # warning cannot spoil the JSON.
+            terminals="$(orca terminal list --worktree "path:${wt_path}" --json 2>/dev/null || true)"
+            handle="$(
+                jq -r '
+                    [.result.terminals[]?
+                        | select(.agentIdentity == "claude" and .connected and .writable)]
+                    | first | .handle // empty
+                ' <<<"$terminals" 2>/dev/null || true
+            )"
+            if [[ -z "$handle" ]]; then
+                missing+=("Orca has no Claude terminal in the workspace at ${wt_path}")
+                continue
+            fi
+            backend=orca
+            break
+            ;;
+    esac
+done
+
+if [[ -z "$agent_status" && -z "$handle" ]]; then
+    {
+        echo "Issue #${issue}'s session is not running, so nothing was sent."
+        printf '  %s.\n' "${missing[@]}"
+        echo "Branch:   ${wt_branch}"
+        echo "Worktree: ${wt_path}"
+    } >&2
+    exit 1
+fi
+
+case "$backend" in
+    herdr)
+        # Herdr queues a prompt behind the agent's turn, but refuses one
+        # while the agent waits on a permission prompt (agent_blocked);
+        # Herdr explains its own failures.
+        if ! herdr agent prompt "$agent_name" "$message" >/dev/null; then
+            echo "Herdr did not take the message for ${agent_name} (${agent_status})." >&2
+            exit 1
+        fi
+        echo "Sent to issue #${issue}: Herdr agent ${agent_name} (${agent_status})."
+        ;;
+    orca)
+        # With --enter the text is pasted as one prompt to the running agent.
+        # --wait-submit watches for the turn to start and never resends, so
+        # a message to a busy session is reported as queued.
+        if ! receipt="$(
+            orca terminal send --terminal "$handle" --text "$message" --enter \
+                --wait-submit 10 --json 2>/dev/null
+        )"; then
+            echo "Orca did not take the message for terminal ${handle}:" >&2
+            echo "$receipt" >&2
+            exit 1
+        fi
+        if ! jq -e '.ok' <<<"$receipt" >/dev/null 2>&1; then
+            echo "Orca did not take the message for terminal ${handle}:" >&2
+            jq -r '.error.message // .error.code // .' <<<"$receipt" 2>/dev/null >&2 ||
+                echo "$receipt" >&2
+            exit 1
+        fi
+        # Orca's receipt lists what it saw happen to the prompt: input_accepted,
+        # then turn_started once the session began a turn on it. A session
+        # busy with a turn takes it up when that turn ends.
+        seen="$(
+            jq -r '
+                (.result.send.prompt.stages // []) as $stages
+                | if $stages | index("turn_started") then "the session took it up"
+                  elif .result.send.accepted == true then
+                      "queued; the session takes it up when its turn ends"
+                  else empty end
+            ' <<<"$receipt" 2>/dev/null || true
+        )"
+        if [[ -z "$seen" ]]; then
+            echo "Orca did not accept the message for terminal ${handle}:" >&2
+            jq -c '.result' <<<"$receipt" >&2
+            exit 1
+        fi
+        echo "Sent to issue #${issue}: Orca terminal ${handle} (${seen})."
+        ;;
+esac
