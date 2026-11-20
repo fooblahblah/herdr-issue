@@ -67,16 +67,23 @@ place of Claude Code, in either host: Orca starts it with
 with it, and so is `--ultracode`. Superpowers is a Claude Code plugin, so an
 Antigravity session always runs in `plain` mode, whatever plugins are enabled.
 
-The prompt is the same apart from what only Claude Code has: there is no
-model routing for subagents, the final whole-branch review is a pass of the
-session's own rather than the `final-reviewer` agent, and `pr-land` runs in
-the foreground rather than under a Monitor. In Herdr the sidebar names the
-issues but not the PR, since the hook that adds it runs only in Claude Code.
+The prompt routes subagents by tier as it does for Claude Code, through the
+`Model` parameter of Antigravity's `invoke_subagent` tool. That parameter
+takes only `inherit` (the session's own model), `flash_lite`, `flash` and
+`pro`, so these are the values its tiers and final review accept. With `agy`
+1.5.11, `flash_lite` ran Gemini 3.5 Flash Lite, `flash` Gemini 4 Hydrogen at
+high and `pro` Gemini 4 Hydrogen at xhigh. Out of the box light work goes to
+`flash`, standard work to `pro`, and heavy work and the final whole-branch
+review stay on the session's model; the launch summary lists these. The
+final review is a subagent of the session's rather than the
+`final-reviewer` agent, and `pr-land` runs in the foreground rather than
+under a Monitor. In Herdr the sidebar names the issues but not the PR, since
+the hook that adds it runs only in Claude Code.
 
 To make Antigravity the default, set the agent in a config file:
 
 ```json
-{ "agent": "antigravity", "antigravity": { "model": "gemini-4-neon-high" } }
+{ "agent": "antigravity", "antigravity": { "coordinator": { "model": "gemini-4-neon-high" } } }
 ```
 
 `--agent claude` then picks Claude Code for one launch.
@@ -202,41 +209,67 @@ winning key by key:
 3. `.claude/issue-herd.json` in the repository;
 4. `--model` and `--effort` on the command line, for the session only.
 
+Each agent has its own section, `claude` and `antigravity`:
+
 ```json
 {
-  "coordinator": { "model": "fable", "effort": "high" },
-  "ultracode_coordinator": { "effort": "xhigh" },
-  "tiers": {
-    "light": { "model": "haiku" },
-    "standard": { "model": "opus", "effort": "medium" },
-    "heavy": { "model": "opus" }
+  "agent": "claude",
+  "claude": {
+    "coordinator": { "model": "fable", "effort": "high" },
+    "ultracode_coordinator": { "effort": "xhigh" },
+    "tiers": {
+      "light": { "model": "haiku" },
+      "standard": { "model": "opus", "effort": "medium" },
+      "heavy": { "model": "opus" }
+    },
+    "final_review": { "model": "fable", "effort": "high" }
   },
-  "final_review": { "model": "fable", "effort": "high" }
+  "antigravity": {
+    "coordinator": { "model": "gemini-4-neon-high" },
+    "tiers": {
+      "light": { "model": "flash" },
+      "standard": { "model": "pro" },
+      "heavy": { "model": "inherit" }
+    },
+    "final_review": { "model": "inherit" }
+  }
 }
 ```
 
-A file only needs the keys it changes. `{"tiers": {"standard": {"model": "opus", "effort": "medium"}}}`
-alone routes the everyday work to Opus 5.5 at medium effort.
+A file only needs the keys it changes.
+`{"claude": {"tiers": {"standard": {"model": "opus", "effort": "medium"}}}}`
+alone routes Claude's everyday work to Opus 5.5 at medium effort.
 
-- `coordinator` is the session itself. Its model goes to `claude --model`, so
-  it may be an alias or a full model ID such as `claude-fable-5-2`.
-- `ultracode_coordinator` is the session under `--ultracode`. It takes the
-  coordinator's model unless it names its own.
+- `agent` is `claude` (the default) or `antigravity`, the agent a launch runs
+  without `--agent`; see [Antigravity](#antigravity).
+- `coordinator` is the session itself. Its model goes to the agent's
+  `--model`: for Claude an alias or a full model ID such as
+  `claude-fable-5-2`, for Antigravity a model ID such as
+  `gemini-4-neon-high`.
+- `ultracode_coordinator`, Claude only, is the session under `--ultracode`.
+  It takes the coordinator's model unless it names its own.
 - `tiers` are the subagent routes the prompt describes: `light` for
   transcription and single-file mechanical fixes, `standard` for most
   implementation, `heavy` for design, hard debugging and judgment-heavy
-  review. A tier without an `effort` (or with `null`) inherits the session's.
-- `final_review` is the model and effort the session dispatches the
-  `final-reviewer` agent with.
-- `agent` is `claude` (the default) or `antigravity`, and `antigravity.model`
-  the Antigravity model ID; see [Antigravity](#antigravity). The other keys
-  apply only to Claude Code.
+  review. A Claude tier without an `effort` (or with `null`) inherits the
+  session's.
+- `final_review` is the model, and for Claude the effort, the final
+  whole-branch review is dispatched with.
 
-Tier and final-review models must be `haiku`, `sonnet`, `opus` or `fable`,
-the names Claude Code's Agent tool accepts. Effort is one of `low`, `medium`,
-`high`, `xhigh` or `max`. A config with an unknown key or a bad value
-launches nothing and names the file and key. The launch summary shows the
-session's model and effort.
+Claude's tier and final-review models must be `haiku`, `sonnet`, `opus` or
+`fable`, the names Claude Code's Agent tool accepts; Antigravity's must be
+`inherit`, `flash_lite`, `flash` or `pro`. Effort is one of `low`, `medium`,
+`high`, `xhigh` or `max`. Antigravity takes its effort from the model ID, so
+no key in its section takes an `effort`. A config with an unknown key or a bad
+value launches nothing and names the file and key. The launch summary shows
+the session's model and effort.
+
+The Claude keys may also sit at the top level, as they did before the
+sections existed: `{"coordinator": {"model": "fable"}}` is read as
+`{"claude": {"coordinator": {"model": "fable"}}}`, and `antigravity.model` as
+`antigravity.coordinator.model`. Each file is read this way before the files
+merge, so a later file wins whichever form each is written in; within one
+file, the `claude` section (or `antigravity.coordinator`) wins a clash.
 
 ```
 /issue-herd:issue 123 --model fable
@@ -275,6 +308,8 @@ The configured models fill these:
   (`Opus 5.5`) and effort (`high`);
 - `{{LIGHT_MODEL}}`, `{{STANDARD_MODEL}}` and `{{HEAVY_MODEL}}`: each routing
   tier's model name, followed by ` at <effort> effort` when the tier sets one;
+  for Antigravity, the tier's `Model` value as `` `Model: "flash"` ``, with
+  ` (this session's own model)` after `inherit`;
 - `{{FINAL_REVIEW_MODEL}}`: the final review's model name;
   `{{FINAL_REVIEW_ALIAS}}` and `{{FINAL_REVIEW_EFFORT}}`: the model alias and
   effort to dispatch it with.

@@ -130,9 +130,9 @@ each test this PR adds, including any a reviewer asked for:
 Where the repository documents its own test tiers, markers, or time budget,
 follow them. Give each decision one line in the PR description.
 
-{{#claude}}
 MODEL / SUBAGENT ROUTING
 
+{{#claude}}
 Use {{COORDINATOR_MODEL}} as the parent coordinator.
 
 {{#superpowers}}
@@ -152,6 +152,14 @@ directly, rather than letting them inherit {{COORDINATOR_MODEL}} simply because 
 parent model.
 {{/ultracode}}
 
+{{/claude}}
+{{#antigravity}}
+Use {{COORDINATOR_MODEL}} as the parent coordinator. Start subagents with
+the `invoke_subagent` tool, and choose its `Model` for every subagent
+rather than leaving it to inherit {{COORDINATOR_MODEL}} simply because it is
+the parent model.
+
+{{/antigravity}}
 Use {{LIGHT_MODEL}} for:
 - transcription tasks, where the plan already contains the complete code to
   write and the work is applying it and running the tests;
@@ -173,25 +181,28 @@ Use {{HEAVY_MODEL}} for:
 - integration work spanning multiple components where judgment is required;
 - tasks where an implementer from the default tier above discovers hidden
   complexity;
+{{#claude}}
 - reviews requiring substantial judgment;
 - the final whole-branch review, with the model and effort given below.
+{{/claude}}
+{{#antigravity}}
+- reviews requiring substantial judgment.
+{{/antigravity}}
 
 For task-scoped reviews, use the least expensive model that can reliably judge
 the diff. Escalate to {{HEAVY_MODEL}} for subtle, cross-cutting, or high-risk
 work.
 
+{{#claude}}
 Where a model above names an effort level, pass that level as the subagent's
 effort. Otherwise leave its effort unset, so it inherits this session's
 {{EFFORT}} effort.
 {{/claude}}
 {{#antigravity}}
-SUBAGENTS
-
-This session runs {{COORDINATOR_MODEL}}. Wherever this prompt hands work or a
-review to a subagent, use a subagent of your own if you can start one, so a
-review comes from someone who did not write the code. Otherwise do the work
-yourself, and review each change afresh, as if someone else wrote it, before
-moving on.
+Wherever this prompt hands work or a review to a subagent, the review comes
+from someone who did not write the code. If you cannot start a subagent, do
+the work yourself, and review each change afresh, as if someone else wrote
+it, before moving on.
 
 Where this prompt says your scratchpad directory, use a directory of your own
 outside this worktree, such as one made with `mktemp -d`.
@@ -290,7 +301,8 @@ Continue autonomously through:
   at {{EFFORT}});
 {{/claude}}
 {{#antigravity}}
-- final whole-branch review: one pass over the full diff against
+- final whole-branch review by a subagent started with
+  `Model: "{{FINAL_REVIEW_ALIAS}}"`: one pass over the full diff against
   `origin/{{DEFAULT_BRANCH}}`, after the task reviews, for defects, unmet
   requirements and problems no single task's review could see;
 {{/antigravity}}
