@@ -970,6 +970,22 @@ def test_a_flag_without_its_value_launches_nothing(harness, args):
             "coordinator.effort must be one of",
         ),
         ("repo", ["opus"], "must hold a JSON object"),
+        ("repo", {"claude": "opus"}, "claude must be a JSON object"),
+        (
+            "repo",
+            {"claude": {"coordinater": {"model": "fable"}}},
+            "unknown key claude.coordinater",
+        ),
+        (
+            "user",
+            {"claude": {"tiers": {"light": {"model": "flash"}}}},
+            "claude.tiers.light.model must be one of haiku, sonnet, opus, fable",
+        ),
+        (
+            "user",
+            {"claude": {"antigravity": {}}},
+            "unknown key claude.antigravity",
+        ),
     ],
 )
 def test_a_bad_config_launches_nothing(harness, where, config, error):
@@ -1010,16 +1026,69 @@ def test_the_shipped_defaults_file_matches_the_built_in_defaults():
     defaults = json.loads((PLUGIN_ROOT / "config" / "defaults.json").read_text())
     assert defaults == {
         "agent": "claude",
-        "coordinator": {"model": "opus", "effort": "high"},
-        "ultracode_coordinator": {"effort": "xhigh"},
-        "tiers": {
-            "light": {"model": "haiku"},
-            "standard": {"model": "sonnet"},
-            "heavy": {"model": "opus"},
+        "claude": {
+            "coordinator": {"model": "opus", "effort": "high"},
+            "ultracode_coordinator": {"effort": "xhigh"},
+            "tiers": {
+                "light": {"model": "haiku"},
+                "standard": {"model": "sonnet"},
+                "heavy": {"model": "opus"},
+            },
+            "final_review": {"model": "opus", "effort": "xhigh"},
         },
-        "final_review": {"model": "opus", "effort": "xhigh"},
-        "antigravity": {"model": "gemini-4-neon-high"},
+        "antigravity": {
+            "coordinator": {"model": "gemini-4-neon-high"},
+            "tiers": {
+                "light": {"model": "flash"},
+                "standard": {"model": "pro"},
+                "heavy": {"model": "inherit"},
+            },
+            "final_review": {"model": "inherit"},
+        },
     }
+
+
+def test_a_claude_section_configures_claude(harness):
+    harness.write_config(
+        harness.user_config,
+        {
+            "claude": {
+                "coordinator": {"model": "fable", "effort": "medium"},
+                "tiers": {"standard": {"model": "opus"}},
+                "final_review": {"model": "fable", "effort": "high"},
+            }
+        },
+    )
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert session_model(calls) == ("fable", "medium")
+    prompt = " ".join(prompt_sent(calls).split())
+    assert "Use Opus 5.5 by default for:" in prompt
+    assert "dispatched with model `fable` and effort `high`" in prompt
+
+
+def test_a_claude_section_wins_over_flat_keys_in_the_same_file(harness):
+    harness.write_config(
+        harness.user_config,
+        {
+            "coordinator": {"model": "sonnet", "effort": "low"},
+            "claude": {"coordinator": {"model": "fable"}},
+        },
+    )
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # The flat effort still applies; only the clashing model is overridden.
+    assert session_model(calls) == ("fable", "low")
+
+
+def test_a_later_file_flat_keys_win_over_an_earlier_claude_section(harness):
+    harness.write_config(
+        harness.user_config, {"claude": {"coordinator": {"model": "fable"}}}
+    )
+    harness.write_config(harness.repo_config, {"coordinator": {"model": "sonnet"}})
+    proc, calls = harness.run("101", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert session_model(calls) == ("sonnet", "high")
 
 
 # --- Orca --------------------------------------------------------------------
@@ -1427,10 +1496,13 @@ def test_the_antigravity_prompt_drops_claude_only_tools(harness):
     prompt = prompt_sent(calls)
     flat = " ".join(prompt.split())
     assert "{{" not in prompt
-    for claude_only in ("Monitor", "final-reviewer", "MODEL / SUBAGENT ROUTING", "Opus", "Haiku"):
+    for claude_only in ("Monitor", "final-reviewer", "Opus", "Haiku", "effort"):
         assert claude_only not in prompt, claude_only
-    assert "This session runs gemini-4-neon-high." in flat
-    assert "final whole-branch review: one pass over the full diff against `origin/main`" in flat
+    assert "Use gemini-4-neon-high as the parent coordinator." in flat
+    assert (
+        "final whole-branch review by a subagent started with `Model: \"inherit\"`:"
+        " one pass over the full diff against `origin/main`"
+    ) in flat
     assert "run this in the foreground and wait for it to finish:" in flat
     assert f'"{PLUGIN_ROOT}/scripts/pr-land" <PR number> -- <gh pr merge flags>' in prompt
     assert "outside this worktree, such as one made with `mktemp -d`" in flat
@@ -1457,6 +1529,22 @@ def test_the_claude_prompt_keeps_its_tools(harness):
          "antigravity.effort is not a key: Antigravity takes its effort from the model ID"),
         ((), {"antigravity": {"model": "bad model"}}, "antigravity.model is not a model name"),
         ((), {"antigravity": "gemini-4-neon-high"}, "antigravity must be a JSON object"),
+        ((), {"antigravity": {"coordinator": {"model": "gemini-4-neon-low", "effort": "low"}}},
+         "antigravity.coordinator.effort is not a key: Antigravity takes its effort"),
+        ((), {"antigravity": {"tiers": {"light": {"model": "flash", "effort": "low"}}}},
+         "antigravity.tiers.light.effort is not a key"),
+        ((), {"antigravity": {"tiers": {"light": {"model": "gemini-3.8-flash-low"}}}},
+         "antigravity.tiers.light.model must be one of inherit, flash_lite, flash, pro"),
+        ((), {"antigravity": {"tiers": {"heavy": {"model": "opus"}}}},
+         "antigravity.tiers.heavy.model must be one of inherit, flash_lite, flash, pro"),
+        ((), {"antigravity": {"final_review": {"model": "fable"}}},
+         "antigravity.final_review.model must be one of inherit, flash_lite, flash, pro"),
+        ((), {"antigravity": {"tiers": {"medium": {"model": "pro"}}}},
+         "unknown key antigravity.tiers.medium"),
+        ((), {"antigravity": {"ultracode_coordinator": {"model": "gemini-4-neon-high"}}},
+         "unknown key antigravity.ultracode_coordinator"),
+        ((), {"antigravity": {"coordinator": {"model": "bad model"}}},
+         "antigravity.coordinator.model is not a model name"),
     ],
 )
 def test_bad_antigravity_settings_launch_nothing(harness, args, config, error):
@@ -1475,3 +1563,85 @@ def test_an_unknown_agent_is_a_usage_error(harness, args):
     assert proc.returncode == 2
     assert "usage: issue-herd" in proc.stderr
     assert launched_nothing(calls)
+
+
+def test_antigravity_routes_subagents_by_tier(harness):
+    proc, calls = harness.run("101", "--agent", "antigravity", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    prompt = prompt_sent(calls)
+    flat = " ".join(prompt.split())
+    assert "MODEL / SUBAGENT ROUTING" in prompt
+    assert "SUBAGENTS\n" not in prompt
+    assert "`invoke_subagent`" in flat
+    assert 'Use `Model: "flash"` for:' in prompt
+    assert 'Use `Model: "pro"` by default for:' in prompt
+    assert 'Use `Model: "inherit"` (this session\'s own model) for:' in prompt
+    assert "If you cannot start a subagent, do the work yourself" in flat
+    assert (
+        "Subagents: light flash, standard pro, heavy inherit, review inherit\n"
+        in proc.stdout
+    )
+
+
+def test_antigravity_tiers_and_final_review_follow_the_config(harness):
+    harness.write_config(
+        harness.repo_config,
+        {
+            "antigravity": {
+                "tiers": {
+                    "light": {"model": "flash_lite"},
+                    "standard": {"model": "flash"},
+                    "heavy": {"model": "pro"},
+                },
+                "final_review": {"model": "pro"},
+            }
+        },
+    )
+    proc, calls = harness.run("101", "--agent", "antigravity", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    prompt = prompt_sent(calls)
+    flat = " ".join(prompt.split())
+    assert 'Use `Model: "flash_lite"` for:' in prompt
+    assert 'Use `Model: "flash"` by default for:' in prompt
+    assert 'Use `Model: "pro"` for:' in prompt
+    assert 'Escalate to `Model: "pro"` for subtle' in flat
+    assert 'final whole-branch review by a subagent started with `Model: "pro"`' in flat
+    assert 'Model: "inherit"' not in prompt
+    assert (
+        "Subagents: light flash_lite, standard flash, heavy pro, review pro\n"
+        in proc.stdout
+    )
+    # Claude keeps its own tiers.
+    harness.log.unlink()
+    proc, calls = harness.run("102", issues={"102": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Use Haiku 5.5 for:" in prompt_sent(calls)
+    assert "Subagents:" not in proc.stdout
+
+
+def test_antigravity_coordinator_model_wins_over_its_old_key(harness):
+    harness.write_config(
+        harness.user_config,
+        {
+            "antigravity": {
+                "model": "gemini-4-argon-high",
+                "coordinator": {"model": "gemini-4-neon-low"},
+            }
+        },
+    )
+    proc, calls = harness.run("101", "--agent", "antigravity", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert claude_args(calls) == ["--model", "gemini-4-neon-low"]
+
+
+def test_antigravity_old_model_key_in_a_later_file_wins(harness):
+    harness.write_config(
+        harness.user_config,
+        {"antigravity": {"coordinator": {"model": "gemini-4-neon-low"}}},
+    )
+    harness.write_config(
+        harness.repo_config, {"antigravity": {"model": "gemini-4-argon-high"}}
+    )
+    proc, calls = harness.run("101", "--agent", "antigravity", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert claude_args(calls) == ["--model", "gemini-4-argon-high"]

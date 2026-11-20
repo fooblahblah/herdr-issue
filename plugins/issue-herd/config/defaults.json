@@ -1,12 +1,22 @@
 {
   "agent": "claude",
-  "coordinator": { "model": "opus", "effort": "high" },
-  "ultracode_coordinator": { "effort": "xhigh" },
-  "tiers": {
-    "light": { "model": "haiku" },
-    "standard": { "model": "sonnet" },
-    "heavy": { "model": "opus" }
+  "claude": {
+    "coordinator": { "model": "opus", "effort": "high" },
+    "ultracode_coordinator": { "effort": "xhigh" },
+    "tiers": {
+      "light": { "model": "haiku" },
+      "standard": { "model": "sonnet" },
+      "heavy": { "model": "opus" }
+    },
+    "final_review": { "model": "opus", "effort": "xhigh" }
   },
-  "final_review": { "model": "opus", "effort": "xhigh" },
-  "antigravity": { "model": "gemini-4-neon-high" }
+  "antigravity": {
+    "coordinator": { "model": "gemini-4-neon-high" },
+    "tiers": {
+      "light": { "model": "flash" },
+      "standard": { "model": "pro" },
+      "heavy": { "model": "inherit" }
+    },
+    "final_review": { "model": "inherit" }
+  }
 }

@@ -119,7 +119,21 @@ if ! resolved="$(
         # full model ID, but never anything a shell or prompt could misread.
         def model_name: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._\\[\\]-]*$");
 
-        def section_errors($path; $session; $tier):
+        # Antigravity starts subagents with its invoke_subagent tool, whose
+        # Model parameter takes only these names (agy 1.5.11).
+        def antigravity_aliases: ["inherit", "flash_lite", "flash", "pro"];
+        # Each harness section takes these keys. The Claude ones are also read
+        # at the top level, as they were before the sections existed.
+        def harness_keys($harness):
+            if $harness == "claude" then
+                ["coordinator", "ultracode_coordinator", "tiers", "final_review"]
+            else ["coordinator", "tiers", "final_review"] end;
+        # Antigravity names its effort in the model ID (gemini-4-neon-high),
+        # so none of its sections takes an effort.
+        def no_effort($path):
+            "\($path).effort is not a key: Antigravity takes its effort from the model ID, as in gemini-4-neon-high";
+
+        def section_errors($path; $harness; $session; $tier):
             if type != "object" then "\($path) must be a JSON object"
             else
                 (keys_unsorted[] | select(IN("model", "effort") | not)
@@ -128,66 +142,103 @@ if ! resolved="$(
                     if $session then
                         if .model | model_name then empty
                         else "\($path).model is not a model name" end
-                    elif IN(.model; aliases[]) then empty
-                    else "\($path).model \(aliases | one_of)" end
+                    else
+                        (if $harness == "claude" then aliases else antigravity_aliases end) as $names
+                        | if IN(.model; $names[]) then empty
+                        else "\($path).model \($names | one_of)" end
+                    end
                 else empty end),
                 # A tier effort of null means the subagent inherits the
                 # session level, as it does when none is set.
                 (if has("effort") then
-                    if IN(.effort; efforts[]) or ($tier and .effort == null) then empty
+                    if $harness == "antigravity" then no_effort($path)
+                    elif IN(.effort; efforts[]) or ($tier and .effort == null) then empty
                     else "\($path).effort \(efforts | one_of)" end
                 else empty end)
             end;
+
+        # The errors in one harness section, given as the object holding its
+        # keys; $prefix leads every path it names.
+        def harness_errors($prefix; $harness):
+            (if has("coordinator") then
+                .coordinator | section_errors("\($prefix)coordinator"; $harness; true; false)
+            else empty end),
+            (if has("ultracode_coordinator") then
+                .ultracode_coordinator
+                | section_errors("\($prefix)ultracode_coordinator"; $harness; true; false)
+            else empty end),
+            (if has("final_review") then
+                .final_review | section_errors("\($prefix)final_review"; $harness; false; false)
+            else empty end),
+            (if has("tiers") then
+                .tiers
+                | if type != "object" then "\($prefix)tiers must be a JSON object"
+                else
+                    to_entries[]
+                    | if IN(.key; "light", "standard", "heavy") then
+                        .key as $tier
+                        | .value | section_errors("\($prefix)tiers.\($tier)"; $harness; false; true)
+                    else "unknown key \($prefix)tiers.\(.key)" end
+                end
+            else empty end);
 
         def config_errors:
             if type != "object" then "must hold a JSON object"
             else
                 (keys_unsorted[]
-                    | select(IN("agent", "antigravity", "coordinator", "ultracode_coordinator",
-                        "tiers", "final_review") | not)
+                    | select(IN("agent", "claude", "antigravity", harness_keys("claude")[]) | not)
                     | "unknown key \(.)"),
                 (if has("agent") and (.agent | IN("claude", "antigravity") | not) then
                     "agent must be one of claude, antigravity"
                 else empty end),
-                # Antigravity names its effort in the model ID
-                # (gemini-4-neon-high), so its section takes only a model.
+                # The top-level keys are Claude settings.
+                harness_errors(""; "claude"),
+                (if has("claude") then
+                    .claude
+                    | if type != "object" then "claude must be a JSON object"
+                    else
+                        (keys_unsorted[] | select(IN(harness_keys("claude")[]) | not)
+                            | "unknown key claude.\(.)"),
+                        harness_errors("claude."; "claude")
+                    end
+                else empty end),
                 (if has("antigravity") then
                     .antigravity
                     | if type != "object" then "antigravity must be a JSON object"
                     else
-                        (keys_unsorted[] | select(. != "model")
-                            | if . == "effort" then
-                                "antigravity.effort is not a key: Antigravity takes its effort from the model ID, as in gemini-4-neon-high"
+                        (keys_unsorted[]
+                            | select(IN("model", harness_keys("antigravity")[]) | not)
+                            | if . == "effort" then no_effort("antigravity")
                             else "unknown key antigravity.\(.)" end),
+                        # The first key of the section, kept as another name
+                        # for antigravity.coordinator.model.
                         (if has("model") and (.model | model_name | not) then
                             "antigravity.model is not a model name"
-                        else empty end)
-                    end
-                else empty end),
-                (if has("coordinator") then
-                    .coordinator | section_errors("coordinator"; true; false)
-                else empty end),
-                (if has("ultracode_coordinator") then
-                    .ultracode_coordinator | section_errors("ultracode_coordinator"; true; false)
-                else empty end),
-                (if has("final_review") then
-                    .final_review | section_errors("final_review"; false; false)
-                else empty end),
-                (if has("tiers") then
-                    .tiers
-                    | if type != "object" then "tiers must be a JSON object"
-                    else
-                        to_entries[]
-                        | if IN(.key; "light", "standard", "heavy") then
-                            .key as $tier | .value | section_errors("tiers.\($tier)"; false; true)
-                        else "unknown key tiers.\(.key)" end
+                        else empty end),
+                        harness_errors("antigravity."; "antigravity")
                     end
                 else empty end)
             end;
 
+        # One valid file in its nested form. Its top-level Claude keys move
+        # into its claude section, which wins a clash, and antigravity.model
+        # becomes antigravity.coordinator.model, which wins a clash. Done per
+        # file before the files merge, so a later file still overrides an
+        # earlier one whichever form each is written in.
+        def nested:
+            ({claude: with_entries(select(.key | IN(harness_keys("claude")[])))}
+                * {claude: (.claude // {})}) as $folded
+            | with_entries(select(.key | IN(harness_keys("claude")[]) | not))
+            | .claude = $folded.claude
+            | if .antigravity | has("model")? // false then
+                .antigravity = ({coordinator: {model: .antigravity.model}}
+                    * (.antigravity | del(.model)))
+            else . end;
+
         reduce inputs as $file ({config: {}, errors: []};
-            .errors += [$file | config_errors | "\(input_filename): \(.)"]
-            | if ($file | type) == "object" then .config *= $file else . end)
+            [$file | config_errors | "\(input_filename): \(.)"] as $errors
+            | .errors += $errors
+            | if $errors == [] then .config *= ($file | nested) else . end)
         | .errors += [
             (if $model == "" or ($model | model_name) then empty
                 else "--model is not a model name" end),
@@ -205,10 +256,10 @@ if ! resolved="$(
         ]
         | if .errors != [] then
             "\(.errors | join("\n"))\nNothing was launched.\n" | halt_error(1)
-        else .config end
+        else .config[$agent] end
         # Ultracode sessions take the coordinator model unless their own is set.
         | (if $agent == "antigravity" then
-            {model: .antigravity.model, effort: ""}
+            {model: .coordinator.model, effort: ""}
         elif $mode == "ultracode" then
             {model: .coordinator.model} + .ultracode_coordinator
         else .coordinator end) as $session
@@ -216,15 +267,18 @@ if ! resolved="$(
             | if $model != "" then .model = $model else . end
             | if $effort != "" then .effort = $effort else . end
         ) as $session
-        | $agent, $session.model, $session.effort,
+        # The agent comes last because it is never empty: the command
+        # substitution drops trailing empty lines, such as an Antigravity
+        # final review without an effort.
+        | $session.model, $session.effort,
           (.tiers | .light, .standard, .heavy | .model, .effort // ""),
-          .final_review.model, .final_review.effort
+          .final_review.model, .final_review.effort // "",
+          $agent
     ' "${config_files[@]}"
 )"; then
     exit 1
 fi
 {
-    read -r agent
     read -r session_model
     read -r session_effort
     read -r light_model
@@ -235,6 +289,7 @@ fi
     read -r heavy_effort
     read -r review_model
     read -r review_effort
+    read -r agent
 } <<<"$resolved"
 
 # The names the prompt uses. Each alias names the model it currently selects
@@ -250,9 +305,18 @@ model_name() {
 }
 
 # A routing tier as the prompt names it: "Sonnet 5.5", or with its own
-# effort, "Opus 5.5 at medium effort".
+# effort, "Opus 5.5 at medium effort". For Antigravity it is the value of
+# invoke_subagent's Model parameter: `Model: "flash"`.
 tier_name() {
-    echo "$(model_name "$1")${2:+ at $2 effort}"
+    if [[ "$agent" == antigravity ]]; then
+        if [[ "$1" == inherit ]]; then
+            echo "\`Model: \"inherit\"\` (this session's own model)"
+        else
+            echo "\`Model: \"$1\"\`"
+        fi
+    else
+        echo "$(model_name "$1")${2:+ at $2 effort}"
+    fi
 }
 
 # The host that gets the worktree and the Claude session: Herdr or Orca, from
@@ -755,6 +819,12 @@ orca_effort="$session_effort"
 if [[ "$backend" == orca && "$session_model" == *haiku* ]]; then
     orca_effort=""
 fi
+# Antigravity's subagent routes, which only its summary shows.
+subagents_line=""
+if [[ "$agent" == antigravity ]]; then
+    subagents_line="Subagents: light ${light_model}, standard ${standard_model}, heavy ${heavy_model}, review ${review_model}"
+fi
+
 model_line="${session_model} (${session_effort} effort)"
 if [[ -z "$session_effort" || ("$backend" == orca && -z "$orca_effort") ]]; then
     model_line="${session_model}"
@@ -779,7 +849,8 @@ ${agent_name:+Agent:     ${agent_name}
 }Branch:    ${branch}
 Mode:      ${mode}${mode_note}
 Model:     ${model_line}
-$(printf 'Issue:     %s\n' "${urls[@]}")
+${subagents_line:+${subagents_line}
+}$(printf 'Issue:     %s\n' "${urls[@]}")
 
 The ${agent_label} session is running independently in ${host_name}.
 Send it a message with: /issue-herd:send ${issues[0]} <text>
