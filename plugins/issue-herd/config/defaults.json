@@ -1,4 +1,5 @@
 {
+  "agent": "claude",
   "coordinator": { "model": "opus", "effort": "high" },
   "ultracode_coordinator": { "effort": "xhigh" },
   "tiers": {
@@ -6,5 +7,6 @@
     "standard": { "model": "sonnet" },
     "heavy": { "model": "opus" }
   },
-  "final_review": { "model": "opus", "effort": "xhigh" }
+  "final_review": { "model": "opus", "effort": "xhigh" },
+  "antigravity": { "model": "gemini-4-neon-high" }
 }

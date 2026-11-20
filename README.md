@@ -12,6 +12,7 @@ one worktree, session and PR.
 /issue-herd:issue 123 --plain
 /issue-herd:issue 123 --ultracode
 /issue-herd:issue 123 --backend orca
+/issue-herd:issue 123 --agent antigravity
 ```
 
 The issues get one worktree, branched from the remote default branch, with a
@@ -55,6 +56,35 @@ looked for on `PATH` and then in Orca's shim at
 `~/.config/orca/linux-orca-cli-shim/orca`, which is not on `PATH` in a Herdr
 pane.
 
+## Antigravity
+
+`--agent antigravity` runs the session in the Antigravity CLI (`agy`) in
+place of Claude Code, in either host: Orca starts it with
+`--agent antigravity`, and Herdr with `herdr agent start --kind agy`. It runs
+`gemini-4-neon-high` unless `--model` or the config names another model ID
+(`agy models` lists them). Antigravity puts the effort in the model ID
+(`gemini-4-neon-low` up to `gemini-4-neon-xhigh`), so `--effort` is refused
+with it, and so is `--ultracode`. Superpowers is a Claude Code plugin, so an
+Antigravity session always runs in `plain` mode, whatever plugins are enabled.
+
+The prompt is the same apart from what only Claude Code has: there is no
+model routing for subagents, the final whole-branch review is a pass of the
+session's own rather than the `final-reviewer` agent, and `pr-land` runs in
+the foreground rather than under a Monitor. In Herdr the sidebar names the
+issues but not the PR, since the hook that adds it runs only in Claude Code.
+
+To make Antigravity the default, set the agent in a config file:
+
+```json
+{ "agent": "antigravity", "antigravity": { "model": "gemini-4-neon-high" } }
+```
+
+`--agent claude` then picks Claude Code for one launch.
+
+Antigravity reads `AGENTS.md` and `GEMINI.md`, not `CLAUDE.md`, and does not
+load a repository's `.claude/` rules, agents or hooks, so a repository that
+keeps its instructions there should carry what matters in `AGENTS.md` too.
+
 ## Messaging a session
 
 A running session can be given a message as if it were typed at its prompt,
@@ -70,9 +100,9 @@ message; with no text, the script reads the message from stdin. Any issue of
 a shared session reaches that session. The session is found by its issue,
 through the branch of its worktree, in whichever host is running it: in Herdr
 the message goes to the agent `issue-<N>...` through `herdr agent prompt`,
-and in Orca to the Claude terminal of the issue's workspace through
-`orca terminal send`. Either host queues a message behind the session's
-current turn. The reply says where it went and, in Orca, whether the session
+and in Orca to the Claude or Antigravity terminal of the issue's workspace
+through `orca terminal send`. Either host queues a message behind the
+session's current turn. The reply says where it went and, in Orca, whether the session
 took it up at once or will when its turn ends. Herdr refuses a message while
 the agent waits on a permission prompt. `--backend herdr|orca` before the
 issue number looks in one host only. Nothing is sent when the issue has no
@@ -198,6 +228,9 @@ alone routes the everyday work to Opus 5.5 at medium effort.
   review. A tier without an `effort` (or with `null`) inherits the session's.
 - `final_review` is the model and effort the session dispatches the
   `final-reviewer` agent with.
+- `agent` is `claude` (the default) or `antigravity`, and `antigravity.model`
+  the Antigravity model ID; see [Antigravity](#antigravity). The other keys
+  apply only to Claude Code.
 
 Tier and final-review models must be `haiku`, `sonnet`, `opus` or `fable`,
 the names Claude Code's Agent tool accepts. Effort is one of `low`, `medium`,
@@ -213,7 +246,8 @@ session's model and effort.
 ## Requirements
 
 `herdr` (server running) or `orca` (app running, with the repository added to
-it), `gh` (authenticated), `git`, `jq`, and a GitHub `origin` remote.
+it), `gh` (authenticated), `git`, `jq`, and a GitHub `origin` remote. For
+`--agent antigravity`, the `agy` CLI, signed in.
 
 ## Install
 
@@ -228,8 +262,8 @@ A repository that carries `.claude/prompts/autonomous-issue.md` uses that
 template instead of the plugin's. A line `{{#name}}` keeps the lines up to the
 matching `{{/name}}` when `name` is active, and `{{^name}}` keeps them when it
 is not; sections nest and each marker sits on its own line. The active names
-are the mode (`superpowers`, `plain` or `ultracode`) and, when several issues
-are launched, `multi`.
+are the mode (`superpowers`, `plain` or `ultracode`), the agent (`claude` or
+`antigravity`) and, when several issues are launched, `multi`.
 
 `{{ISSUES}}` becomes the issue URLs as one phrase (`A`, `A and B`,
 `A, B and C`), `{{DEFAULT_BRANCH}}` the remote default branch, and

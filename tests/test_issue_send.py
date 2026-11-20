@@ -125,6 +125,19 @@ def test_in_orca_the_message_goes_to_the_claude_terminal_of_the_worktree(harness
     )
 
 
+def test_in_orca_an_antigravity_terminal_takes_the_message(harness):
+    terminals = [
+        {"handle": "term_shell", "agentIdentity": None, "connected": True, "writable": True},
+        {"handle": "term_agy", "agentIdentity": "antigravity", "connected": True, "writable": True},
+    ]
+    proc, calls = send(
+        harness, "101", "Hello there", herdr_up=False, orca_up=True,
+        stub_env={"STUB_ORCA_TERMINALS": json.dumps(terminals)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert orca_sends(calls) == ["term_agy"]
+
+
 def test_a_busy_orca_session_is_reported_as_queued(harness):
     proc, calls = send(
         harness, "101", "Hello", herdr_up=False, orca_up=True,
@@ -172,7 +185,7 @@ def test_a_session_running_nowhere_is_reported_per_host(harness):
     assert proc.returncode == 1
     assert "Issue #101's session is not running, so nothing was sent." in proc.stderr
     assert "Herdr has no agent named issue-101." in proc.stderr
-    assert "Orca has no Claude terminal in the workspace at /wt/101." in proc.stderr
+    assert "Orca has no Claude or Antigravity terminal in the workspace at /wt/101." in proc.stderr
     assert "Branch:   issue/101-notional-title" in proc.stderr
     assert nothing_sent(calls)
 

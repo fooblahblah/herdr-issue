@@ -3,7 +3,8 @@ set -euo pipefail
 
 usage() {
     echo "usage: issue-herd <issue-number>... [--plain | --ultracode]" \
-        "[--model <model>] [--effort <level>] [--backend herdr|orca]" >&2
+        "[--agent claude|antigravity] [--model <model>] [--effort <level>]" \
+        "[--backend herdr|orca]" >&2
     echo "Issue numbers may be separated by spaces or commas, and may start with #." >&2
     exit 2
 }
@@ -13,9 +14,12 @@ usage() {
 # prompt's own workflow and --ultracode turns the session into ultracode; both
 # switch the Superpowers plugin off for the session. --model and --effort
 # override the configured model and effort of this session (see
-# config/defaults.json). --backend names the host that gets the worktree and
-# session, Herdr or Orca, when the detection further down should not decide.
+# config/defaults.json). --agent picks the agent the session runs, Claude
+# Code or Antigravity, over the configured one. --backend names the host that
+# gets the worktree and session, Herdr or Orca, when the detection further
+# down should not decide.
 mode=""
+agent_flag=""
 model_flag=""
 effort_flag=""
 backend=""
@@ -37,7 +41,8 @@ for ((i = 0; i < ${#words[@]}; i++)); do
             [[ -z "$mode" || "$mode" == "${token#--}" ]] || usage
             mode="${token#--}"
             ;;
-        --model | --effort | --backend | --model=* | --effort=* | --backend=*)
+        --agent | --model | --effort | --backend | \
+            --agent=* | --model=* | --effort=* | --backend=*)
             if [[ "$token" == *=* ]]; then
                 value="${token#*=}"
                 token="${token%%=*}"
@@ -47,6 +52,10 @@ for ((i = 0; i < ${#words[@]}; i++)); do
             fi
             [[ -n "$value" && "$value" != --* ]] || usage
             case "$token" in
+                --agent)
+                    [[ "$value" == claude || "$value" == antigravity ]] || usage
+                    agent_flag="$value"
+                    ;;
                 --model) model_flag="$value" ;;
                 --effort) effort_flag="$value" ;;
                 --backend)
@@ -99,7 +108,8 @@ for f in "${XDG_CONFIG_HOME:-$HOME/.config}/issue-herd/config.json" \
 done
 
 if ! resolved="$(
-    jq -n -r --arg mode "$mode" --arg model "$model_flag" --arg effort "$effort_flag" '
+    jq -n -r --arg mode "$mode" --arg agent "$agent_flag" \
+        --arg model "$model_flag" --arg effort "$effort_flag" '
         def efforts: ["low", "medium", "high", "xhigh", "max"];
         # Subagents are dispatched through the Agent tool, which takes only
         # these names.
@@ -133,8 +143,27 @@ if ! resolved="$(
             if type != "object" then "must hold a JSON object"
             else
                 (keys_unsorted[]
-                    | select(IN("coordinator", "ultracode_coordinator", "tiers", "final_review") | not)
+                    | select(IN("agent", "antigravity", "coordinator", "ultracode_coordinator",
+                        "tiers", "final_review") | not)
                     | "unknown key \(.)"),
+                (if has("agent") and (.agent | IN("claude", "antigravity") | not) then
+                    "agent must be one of claude, antigravity"
+                else empty end),
+                # Antigravity names its effort in the model ID
+                # (gemini-4-neon-high), so its section takes only a model.
+                (if has("antigravity") then
+                    .antigravity
+                    | if type != "object" then "antigravity must be a JSON object"
+                    else
+                        (keys_unsorted[] | select(. != "model")
+                            | if . == "effort" then
+                                "antigravity.effort is not a key: Antigravity takes its effort from the model ID, as in gemini-4-neon-high"
+                            else "unknown key antigravity.\(.)" end),
+                        (if has("model") and (.model | model_name | not) then
+                            "antigravity.model is not a model name"
+                        else empty end)
+                    end
+                else empty end),
                 (if has("coordinator") then
                     .coordinator | section_errors("coordinator"; true; false)
                 else empty end),
@@ -165,18 +194,29 @@ if ! resolved="$(
             (if $effort == "" or IN($effort; efforts[]) then empty
                 else "--effort \(efforts | one_of)" end)
         ]
+        | (if $agent != "" then $agent else .config.agent // "claude" end) as $agent
+        | .errors += [
+            (if $agent != "antigravity" then empty
+            elif $effort != "" then
+                "--effort does not apply to Antigravity, which takes its effort from the model ID, as in --model gemini-4-neon-high"
+            elif $mode == "ultracode" then
+                "--ultracode is not available with Antigravity, which has no ultracode"
+            else empty end)
+        ]
         | if .errors != [] then
             "\(.errors | join("\n"))\nNothing was launched.\n" | halt_error(1)
         else .config end
         # Ultracode sessions take the coordinator model unless their own is set.
-        | (if $mode == "ultracode" then
+        | (if $agent == "antigravity" then
+            {model: .antigravity.model, effort: ""}
+        elif $mode == "ultracode" then
             {model: .coordinator.model} + .ultracode_coordinator
         else .coordinator end) as $session
         | ($session
             | if $model != "" then .model = $model else . end
             | if $effort != "" then .effort = $effort else . end
         ) as $session
-        | $session.model, $session.effort,
+        | $agent, $session.model, $session.effort,
           (.tiers | .light, .standard, .heavy | .model, .effort // ""),
           .final_review.model, .final_review.effort
     ' "${config_files[@]}"
@@ -184,6 +224,7 @@ if ! resolved="$(
     exit 1
 fi
 {
+    read -r agent
     read -r session_model
     read -r session_effort
     read -r light_model
@@ -383,7 +424,13 @@ superpowers_plugins="$(
 )"
 
 mode_note=""
-if [[ -z "$mode" ]]; then
+if [[ "$agent" == antigravity ]]; then
+    # Superpowers and ultracode belong to Claude Code, so an Antigravity
+    # session always follows the prompt's own workflow (--ultracode was
+    # refused with the config).
+    mode=plain
+    mode_note=" (Antigravity follows the prompt's own workflow)"
+elif [[ -z "$mode" ]]; then
     if jq -e 'any(.[]; . == true)' <<<"$superpowers_plugins" >/dev/null; then
         mode=superpowers
         mode_note=" (Superpowers plugin detected; --plain runs without it)"
@@ -399,13 +446,15 @@ fi
 # there those modes are refused before anything is created: ultracode always,
 # and plain only while a Superpowers plugin is enabled, since one merely
 # listed as disabled stays off without the file.
+#
+# None of this concerns Antigravity, which never loads Claude plugins.
 needs_settings=""
-if [[ "$backend" == herdr ]] &&
+if [[ "$agent" == claude && "$backend" == herdr ]] &&
     { [[ "$mode" == ultracode ]] ||
         [[ "$mode" == plain && "$superpowers_plugins" != "{}" ]]; }; then
     needs_settings=1
 fi
-if [[ "$backend" == orca ]] &&
+if [[ "$agent" == claude && "$backend" == orca ]] &&
     { [[ "$mode" == ultracode ]] ||
         { [[ "$mode" == plain ]] &&
             jq -e 'any(.[]; . == true)' <<<"$superpowers_plugins" >/dev/null; }; }; then
@@ -424,7 +473,8 @@ fi
 # Build the prompt before creating anything, so a template mistake leaves no
 # worktree behind. Section lines nest: {{#name}} keeps the lines up to its
 # {{/name}} when name is active, and {{^name}} keeps them when it is not. The
-# active names are the mode and, when several issues are launched, multi.
+# active names are the mode, the agent (claude or antigravity) and, when
+# several issues are launched, multi.
 # A repository can carry its own template at
 # .claude/prompts/autonomous-issue.md; otherwise the plugin's is used.
 template="$repo/.claude/prompts/autonomous-issue.md"
@@ -456,7 +506,7 @@ done
 # Values reach awk through the environment and are replaced literally, so no
 # value is ever read as a pattern or an escape.
 prompt="$(
-    MODE="$mode" MULTI="$multi" ISSUES="$issues_text" ISSUE_URL="${urls[0]}" \
+    MODE="$mode" AGENT="$agent" MULTI="$multi" ISSUES="$issues_text" ISSUE_URL="${urls[0]}" \
         DEFAULT_BRANCH="$base" PR_LAND="${plugin_root}/scripts/pr-land" \
         COORDINATOR_MODEL="$(model_name "$session_model")" EFFORT="$session_effort" \
         LIGHT_MODEL="$(tier_name "$light_model" "$light_effort")" \
@@ -478,12 +528,13 @@ prompt="$(
             return out s
         }
         BEGIN {
-            split("superpowers plain ultracode multi", names, " ")
+            split("superpowers plain ultracode multi claude antigravity", names, " ")
             for (i in names) known[names[i]] = 1
             nvars = split("ISSUES ISSUE_URL PR_LAND DEFAULT_BRANCH COORDINATOR_MODEL EFFORT " \
                 "LIGHT_MODEL STANDARD_MODEL HEAVY_MODEL FINAL_REVIEW_MODEL " \
                 "FINAL_REVIEW_ALIAS FINAL_REVIEW_EFFORT", vars, " ")
             active[ENVIRON["MODE"]] = 1
+            active[ENVIRON["AGENT"]] = 1
             if (ENVIRON["MULTI"] != "") active["multi"] = 1
         }
         $0 ~ "^[{][{][#^/][a-z]+[}][}]$" {
@@ -532,7 +583,13 @@ fi
 # session level unless their tier or definition sets one; the final
 # whole-branch review is dispatched at its own configured level (xhigh by
 # default). Ultracode sessions default to xhigh.
-agent_args=(--model "$session_model" --effort "$session_effort")
+#
+# Antigravity takes only its model, whose ID carries the effort.
+if [[ "$agent" == antigravity ]]; then
+    agent_args=(--model "$session_model")
+else
+    agent_args=(--model "$session_model" --effort "$session_effort")
+fi
 
 # Per-session settings for the modes that run without Superpowers: every
 # superpowers* plugin off, so its skills and SessionStart hook stay out of the
@@ -604,7 +661,7 @@ launch_herdr() {
     for attempt in $(seq 1 30); do
         if start_err="$(
             herdr agent start "$agent_name" \
-                --kind claude \
+                --kind "$herdr_kind" \
                 --pane "$pane_id" \
                 --timeout 120000 \
                 -- \
@@ -657,7 +714,7 @@ launch_orca() {
         create_args+=(--reference "$u")
     done
     create_args+=(
-        --agent claude
+        --agent "$agent"
         --surface terminal
         --model "$session_model"
     )
@@ -688,12 +745,18 @@ launch_orca() {
     branch="${created_branch:-$branch}"
 }
 
+# Herdr's agent kind and the name the summary gives the session.
+case "$agent" in
+    claude) herdr_kind=claude agent_label=Claude ;;
+    antigravity) herdr_kind=agy agent_label=Antigravity ;;
+esac
+
 orca_effort="$session_effort"
 if [[ "$backend" == orca && "$session_model" == *haiku* ]]; then
     orca_effort=""
 fi
 model_line="${session_model} (${session_effort} effort)"
-if [[ "$backend" == orca && -z "$orca_effort" ]]; then
+if [[ -z "$session_effort" || ("$backend" == orca && -z "$orca_effort") ]]; then
     model_line="${session_model}"
 fi
 
@@ -718,6 +781,6 @@ Mode:      ${mode}${mode_note}
 Model:     ${model_line}
 $(printf 'Issue:     %s\n' "${urls[@]}")
 
-The Claude session is running independently in ${host_name}.
+The ${agent_label} session is running independently in ${host_name}.
 Send it a message with: /issue-herd:send ${issues[0]} <text>
 EOF
