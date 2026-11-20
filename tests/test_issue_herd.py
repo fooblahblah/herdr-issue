@@ -1009,6 +1009,7 @@ def test_a_tier_effort_of_null_falls_back_to_inheriting(harness):
 def test_the_shipped_defaults_file_matches_the_built_in_defaults():
     defaults = json.loads((PLUGIN_ROOT / "config" / "defaults.json").read_text())
     assert defaults == {
+        "agent": "claude",
         "coordinator": {"model": "opus", "effort": "high"},
         "ultracode_coordinator": {"effort": "xhigh"},
         "tiers": {
@@ -1017,6 +1018,7 @@ def test_the_shipped_defaults_file_matches_the_built_in_defaults():
             "heavy": {"model": "opus"},
         },
         "final_review": {"model": "opus", "effort": "xhigh"},
+        "antigravity": {"model": "gemini-4-neon-high"},
     }
 
 
@@ -1358,4 +1360,118 @@ def test_orca_template_mistakes_create_nothing(harness):
     use_template(harness, "{{#bogus}}\nx\n{{/bogus}}\n")
     proc, calls = harness.run("101", issues={"101": OPEN}, orca_up=True, host_env=IN_ORCA)
     assert proc.returncode == 1
+    assert launched_nothing(calls)
+
+
+# --- Antigravity -------------------------------------------------------------
+
+
+def test_herdr_starts_antigravity_on_neon_with_only_a_model(harness):
+    proc, calls = harness.run("101", "--agent", "antigravity", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    start = agent_starts(calls)[0]
+    assert flag(start, "--kind") == "agy"
+    assert claude_args(calls) == ["--model", "gemini-4-neon-high"]
+    assert "Mode:      plain (Antigravity follows the prompt's own workflow)\n" in proc.stdout
+    assert "Model:     gemini-4-neon-high\n" in proc.stdout
+    assert "The Antigravity session is running independently in Herdr.\n" in proc.stdout
+    assert not (harness.repo / ".git" / "issue-herd").exists()
+
+
+def test_orca_starts_antigravity_without_an_effort(harness):
+    proc, calls = harness.run(
+        "101", "--agent=antigravity", "--model", "gemini-4-hydrogen-xhigh",
+        issues={"101": OPEN}, orca_up=True, host_env=IN_ORCA,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    create = orca_create(calls)
+    assert flag(create, "--agent") == "antigravity"
+    assert flag(create, "--model") == "gemini-4-hydrogen-xhigh"
+    assert "--effort" not in create
+    assert "Model:     gemini-4-hydrogen-xhigh\n" in proc.stdout
+    assert "The Antigravity session is running independently in Orca.\n" in proc.stdout
+
+
+def test_the_config_can_make_antigravity_the_default_agent(harness):
+    harness.write_config(
+        harness.user_config, {"agent": "antigravity", "antigravity": {"model": "gemini-4-argon-high"}}
+    )
+    proc, calls = harness.run("101", issues={"101": OPEN}, orca_up=True, host_env=IN_ORCA)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    create = orca_create(calls)
+    assert (flag(create, "--agent"), flag(create, "--model")) == ("antigravity", "gemini-4-argon-high")
+    # The flag still picks Claude.
+    harness.log.unlink()
+    proc, calls = harness.run(
+        "102", "--agent", "claude", issues={"102": OPEN}, orca_up=True, host_env=IN_ORCA
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    create = orca_create(calls)
+    assert (flag(create, "--agent"), flag(create, "--model")) == ("claude", "opus")
+
+
+def test_antigravity_ignores_superpowers_even_in_orca(harness):
+    harness.enable_plugins({SUPERPOWERS: True})
+    proc, calls = harness.run(
+        "101", "--plain", "--agent", "antigravity",
+        issues={"101": OPEN}, orca_up=True, host_env=IN_ORCA,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Mode:      plain (Antigravity" in proc.stdout
+    assert "normal Superpowers" not in flag(orca_create(calls), "--prompt")
+
+
+def test_the_antigravity_prompt_drops_claude_only_tools(harness):
+    proc, calls = harness.run("101", "--agent", "antigravity", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    prompt = prompt_sent(calls)
+    flat = " ".join(prompt.split())
+    assert "{{" not in prompt
+    for claude_only in ("Monitor", "final-reviewer", "MODEL / SUBAGENT ROUTING", "Opus", "Haiku"):
+        assert claude_only not in prompt, claude_only
+    assert "This session runs gemini-4-neon-high." in flat
+    assert "final whole-branch review: one pass over the full diff against `origin/main`" in flat
+    assert "run this in the foreground and wait for it to finish:" in flat
+    assert f'"{PLUGIN_ROOT}/scripts/pr-land" <PR number> -- <gh pr merge flags>' in prompt
+    assert "outside this worktree, such as one made with `mktemp -d`" in flat
+
+
+def test_the_claude_prompt_keeps_its_tools(harness):
+    proc, calls = harness.run("101", "--plain", issues={"101": OPEN})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    prompt = prompt_sent(calls)
+    assert "under the Monitor tool" in prompt
+    assert "`issue-herd:final-reviewer`" in prompt
+    assert "SUBAGENTS\n" not in prompt and "mktemp" not in prompt
+
+
+@pytest.mark.parametrize(
+    ("args", "config", "error"),
+    [
+        (("--agent", "antigravity", "--effort", "high"), None,
+         "--effort does not apply to Antigravity"),
+        (("--agent", "antigravity", "--ultracode"), None,
+         "--ultracode is not available with Antigravity"),
+        ((), {"agent": "codex"}, "agent must be one of claude, antigravity"),
+        ((), {"antigravity": {"model": "gemini-4-neon", "effort": "high"}},
+         "antigravity.effort is not a key: Antigravity takes its effort from the model ID"),
+        ((), {"antigravity": {"model": "bad model"}}, "antigravity.model is not a model name"),
+        ((), {"antigravity": "gemini-4-neon-high"}, "antigravity must be a JSON object"),
+    ],
+)
+def test_bad_antigravity_settings_launch_nothing(harness, args, config, error):
+    if config is not None:
+        harness.write_config(harness.repo_config, config)
+    proc, calls = harness.run("101", *args, issues={"101": OPEN}, orca_up=True, host_env=IN_ORCA)
+    assert proc.returncode == 1
+    assert error in proc.stderr
+    assert "Nothing was launched." in proc.stderr
+    assert launched_nothing(calls)
+
+
+@pytest.mark.parametrize("args", [("--agent", "codex"), ("--agent",)])
+def test_an_unknown_agent_is_a_usage_error(harness, args):
+    proc, calls = harness.run("101", *args, issues={"101": OPEN})
+    assert proc.returncode == 2
+    assert "usage: issue-herd" in proc.stderr
     assert launched_nothing(calls)

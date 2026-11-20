@@ -130,6 +130,7 @@ each test this PR adds, including any a reviewer asked for:
 Where the repository documents its own test tiers, markers, or time budget,
 follow them. Give each decision one line in the PR description.
 
+{{#claude}}
 MODEL / SUBAGENT ROUTING
 
 Use {{COORDINATOR_MODEL}} as the parent coordinator.
@@ -182,6 +183,19 @@ work.
 Where a model above names an effort level, pass that level as the subagent's
 effort. Otherwise leave its effort unset, so it inherits this session's
 {{EFFORT}} effort.
+{{/claude}}
+{{#antigravity}}
+SUBAGENTS
+
+This session runs {{COORDINATOR_MODEL}}. Wherever this prompt hands work or a
+review to a subagent, use a subagent of your own if you can start one, so a
+review comes from someone who did not write the code. Otherwise do the work
+yourself, and review each change afresh, as if someone else wrote it, before
+moving on.
+
+Where this prompt says your scratchpad directory, use a directory of your own
+outside this worktree, such as one made with `mktemp -d`.
+{{/antigravity}}
 
 TASK GRANULARITY
 
@@ -270,9 +284,16 @@ Continue autonomously through:
   at {{EFFORT}});
 {{/superpowers}}
 {{#plain}}
+{{#claude}}
 - final whole-branch review with the `issue-herd:final-reviewer` agent,
   dispatched with model `{{FINAL_REVIEW_ALIAS}}` and effort `{{FINAL_REVIEW_EFFORT}}` (this session runs
   at {{EFFORT}});
+{{/claude}}
+{{#antigravity}}
+- final whole-branch review: one pass over the full diff against
+  `origin/{{DEFAULT_BRANCH}}`, after the task reviews, for defects, unmet
+  requirements and problems no single task's review could see;
+{{/antigravity}}
 {{/plain}}
 {{#ultracode}}
 - final whole-branch review using {{FINAL_REVIEW_MODEL}};
@@ -300,7 +321,12 @@ Other sessions merge into {{DEFAULT_BRANCH}} while you wait on CI, so land the
 PR with the plugin's lander instead of a polling loop of your own. Once
 nothing but CI stands between the PR and its merge (reviews and verification
 done, the PR marked ready, and any approval you need given), push, then run
+{{#claude}}
 this under the Monitor tool with its timeout at the maximum:
+{{/claude}}
+{{#antigravity}}
+this in the foreground and wait for it to finish:
+{{/antigravity}}
 
     "{{PR_LAND}}" <PR number> -- <gh pr merge flags>
 
@@ -327,10 +353,18 @@ to the queue rather than running `gh pr merge`:
     gh api graphql -f id="$(gh pr view <PR number> --json id -q .id)" \
       -f query='mutation($id: ID!) { enqueuePullRequest(input: {pullRequestId: $id}) { clientMutationId } }'
 
+{{#claude}}
 pr-land runs apart from the Monitor. When the Monitor expires, run the same
 command again to follow it. Stopping the Monitor does not stop the landing:
 to stop it, for example when I ask you to hold off, run
 `"{{PR_LAND}}" --stop <PR number>`.
+{{/claude}}
+{{#antigravity}}
+pr-land runs apart from the command that started it. If the command is cut
+off or times out before pr-land finishes, run the same command again to
+follow it. Ending the command does not stop the landing: to stop it, for
+example when I ask you to hold off, run `"{{PR_LAND}}" --stop <PR number>`.
+{{/antigravity}}
 
 It exits 0 once the PR is merged. Otherwise its last line says why it
 stopped:

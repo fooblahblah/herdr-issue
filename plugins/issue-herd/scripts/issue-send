@@ -14,9 +14,9 @@ set -euo pipefail
 #
 # In Herdr the message goes to the agent the launcher named,
 # issue-<N>[_<N>...], through `herdr agent prompt`, which Herdr queues behind
-# the agent's current turn. In Orca it goes to the Claude terminal of the
-# issue's workspace through `orca terminal send`, which pastes it as a prompt;
-# a session busy with a turn takes it up when that turn ends.
+# the agent's current turn. In Orca it goes to the Claude or Antigravity
+# terminal of the issue's workspace through `orca terminal send`, which pastes
+# it as a prompt; a session busy with a turn takes it up when that turn ends.
 
 usage() {
     echo "usage: issue-send [--backend herdr|orca] <issue-number> <text>..." >&2
@@ -125,12 +125,13 @@ for host in "${hosts[@]}"; do
             handle="$(
                 jq -r '
                     [.result.terminals[]?
-                        | select(.agentIdentity == "claude" and .connected and .writable)]
+                        | select((.agentIdentity | IN("claude", "antigravity"))
+                            and .connected and .writable)]
                     | first | .handle // empty
                 ' <<<"$terminals" 2>/dev/null || true
             )"
             if [[ -z "$handle" ]]; then
-                missing+=("Orca has no Claude terminal in the workspace at ${wt_path}")
+                missing+=("Orca has no Claude or Antigravity terminal in the workspace at ${wt_path}")
                 continue
             fi
             backend=orca
