@@ -1,7 +1,7 @@
 {
   "name": "issue-herd",
-  "version": "0.9.1",
-  "description": "Launch GitHub issues autonomously in a Herdr or Orca worktree and Claude Code session; several issues named together share one worktree, session and PR; message a running session by its issue",
+  "version": "0.10.0",
+  "description": "Launch GitHub issues autonomously in a Herdr or Orca worktree and Claude Code or Antigravity session; several issues named together share one worktree, session and PR; message a running session by its issue",
   "author": {
     "name": "Jeff Simpson"
   },
